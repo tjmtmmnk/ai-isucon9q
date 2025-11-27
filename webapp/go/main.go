@@ -67,13 +67,16 @@ const (
 )
 
 var (
-	templates       *template.Template
-	dbx             *sqlx.DB
-	store           sessions.Store
-	categoryCache   map[int]Category
-	categoryMu      sync.RWMutex
-	userCache       map[int64]User
-	userMu          sync.RWMutex
+	templates          *template.Template
+	dbx                *sqlx.DB
+	store              sessions.Store
+	categoryCache      map[int]Category
+	categoryMu         sync.RWMutex
+	userCache          map[int64]User
+	userMu             sync.RWMutex
+	paymentServiceURL  string
+	shipmentServiceURL string
+	configMu           sync.RWMutex
 )
 
 type Config struct {
@@ -362,6 +365,9 @@ func main() {
 	if err := loadUsers(ctx); err != nil {
 		log.Printf("failed to load users at startup: %v", err)
 	}
+	if err := loadConfigs(ctx); err != nil {
+		log.Printf("failed to load configs at startup: %v", err)
+	}
 
 	root, err := os.OpenRoot("../public")
 	if err != nil {
@@ -578,20 +584,49 @@ func getConfigByName(ctx context.Context, name string) (string, error) {
 	return config.Val, err
 }
 
-func getPaymentServiceURL(ctx context.Context) string {
-	val, _ := getConfigByName(ctx, "payment_service_url")
-	if val == "" {
-		return DefaultPaymentServiceURL
+func loadConfigs(ctx context.Context) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	val, err := getConfigByName(ctx, "payment_service_url")
+	if err != nil {
+		return err
 	}
-	return val
+	if val == "" {
+		paymentServiceURL = DefaultPaymentServiceURL
+	} else {
+		paymentServiceURL = val
+	}
+
+	val, err = getConfigByName(ctx, "shipment_service_url")
+	if err != nil {
+		return err
+	}
+	if val == "" {
+		shipmentServiceURL = DefaultShipmentServiceURL
+	} else {
+		shipmentServiceURL = val
+	}
+
+	return nil
+}
+
+func getPaymentServiceURL(ctx context.Context) string {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	if paymentServiceURL != "" {
+		return paymentServiceURL
+	}
+	return DefaultPaymentServiceURL
 }
 
 func getShipmentServiceURL(ctx context.Context) string {
-	val, _ := getConfigByName(ctx, "shipment_service_url")
-	if val == "" {
-		return DefaultShipmentServiceURL
+	configMu.RLock()
+	defer configMu.RUnlock()
+	if shipmentServiceURL != "" {
+		return shipmentServiceURL
 	}
-	return val
+	return DefaultShipmentServiceURL
 }
 
 func getIndex(w http.ResponseWriter, r *http.Request) {
@@ -637,6 +672,12 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		return
 	}
+
+	// Update config cache directly (more efficient than loading from DB)
+	configMu.Lock()
+	paymentServiceURL = ri.PaymentServiceURL
+	shipmentServiceURL = ri.ShipmentServiceURL
+	configMu.Unlock()
 
 	// Reload caches after initialization
 	if err := loadCategories(ctx); err != nil {

@@ -82,3 +82,54 @@
 - Significant reduction in external API calls during transaction listing
 - One timeout error occurred (-500 penalty) during high load
 
+### Optimization 5: Config Caching (in progress)
+- **Implementation**: Cache payment/shipment service URLs in memory
+- **Changes**: `webapp/go/main.go`
+  - Added `paymentServiceURL`, `shipmentServiceURL` variables with mutex
+  - Added `loadConfigs()` function to load config values at startup
+  - Modified `getPaymentServiceURL()` and `getShipmentServiceURL()` to use cache
+  - Updated `postInitialize()` to set config cache directly
+- **Status**: Implemented but not yet committed
+
+---
+
+## Next Steps (TODO)
+
+### High Priority Optimizations
+
+1. **getTransactions N+1 Query Elimination**
+   - Current: Individual queries for `transaction_evidences` and `shippings` per item
+   - Solution: Bulk query by item IDs, then map results
+   - Expected impact: Significant latency reduction
+
+2. **Parallel External API Calls**
+   - Current: Sequential API calls for non-done shipping status in getTransactions
+   - Solution: Use goroutines to parallelize API calls
+   - Expected impact: Reduce total API call time from sum to max
+
+3. **bcrypt Cost Reduction** (Consider carefully)
+   - Current: BcryptCost = 10 (default)
+   - Solution: Reduce to 4-6 for faster login
+   - Risk: Security implications, but common in ISUCON
+
+### Medium Priority Optimizations
+
+4. **Remove Unnecessary Transactions**
+   - `getTransactions` uses a transaction for read-only operations
+   - Could potentially remove for better concurrency
+
+5. **getUser Cache Usage**
+   - `getUser()` always queries DB for session validation
+   - Could use userCache after initial validation
+
+6. **Campaign Setting**
+   - Manual.md mentions campaign settings (0-4) affect user count
+   - Higher campaign = more users = more transactions = higher score
+   - But also more load, so timing is important
+
+### Current Bottlenecks (from last benchmark)
+- POST /login - bcrypt is CPU intensive
+- GET /users/transactions.json - still slow despite optimizations
+- POST /buy, POST /ship - external API call overhead
+- Various endpoints timing out under high load
+
