@@ -68,3 +68,17 @@
 - Items queries now use indexes instead of full table scans
 - Previous slow queries (P95 ~1200ms) now significantly faster
 
+### Optimization 4: Skip External API Calls for Terminal States
+- **Implementation**: Skip `APIShipmentStatus` call in `getTransactions` when shipping status is already "done"
+- **Rationale**: "done" is a terminal state that won't change, so external API call is unnecessary
+- **Changes**: `webapp/go/main.go`
+  - Modified `getTransactions()` to check `shipping.Status` before calling external API
+  - If status is `ShippingsStatusDone`, use DB value directly instead of calling API
+  - This eliminates N external API calls for completed transactions
+
+#### Results After Optimization 4
+- **Score: 4550 (+1940, +74%)**
+- **Cumulative: 1810 → 4550 (+151%)**
+- Significant reduction in external API calls during transaction listing
+- One timeout error occurred (-500 penalty) during high load
+
