@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -66,9 +67,11 @@ const (
 )
 
 var (
-	templates *template.Template
-	dbx       *sqlx.DB
-	store     sessions.Store
+	templates       *template.Template
+	dbx             *sqlx.DB
+	store           sessions.Store
+	categoryCache   map[int]Category
+	categoryMu      sync.RWMutex
 )
 
 type Config struct {
@@ -350,6 +353,11 @@ func main() {
 	}
 	defer dbx.Close()
 
+	// Load category cache at startup
+	if err := loadCategories(ctx); err != nil {
+		log.Printf("failed to load categories at startup: %v", err)
+	}
+
 	root, err := os.OpenRoot("../public")
 	if err != nil {
 		log.Fatalf("failed to open root: %v", err)
@@ -450,7 +458,45 @@ func getUserSimpleByID(ctx context.Context, q sqlx.QueryerContext, userID int64)
 	return userSimple, err
 }
 
+func loadCategories(ctx context.Context) error {
+	categories := []Category{}
+	err := dbx.SelectContext(ctx, &categories, "SELECT * FROM `categories`")
+	if err != nil {
+		return err
+	}
+
+	categoryMu.Lock()
+	defer categoryMu.Unlock()
+
+	categoryCache = make(map[int]Category, len(categories))
+	for _, c := range categories {
+		categoryCache[c.ID] = c
+	}
+
+	// Set parent category names
+	for id, c := range categoryCache {
+		if c.ParentID != 0 {
+			if parent, ok := categoryCache[c.ParentID]; ok {
+				c.ParentCategoryName = parent.CategoryName
+				categoryCache[id] = c
+			}
+		}
+	}
+
+	return nil
+}
+
 func getCategoryByID(ctx context.Context, q sqlx.QueryerContext, categoryID int) (category Category, err error) {
+	categoryMu.RLock()
+	if categoryCache != nil {
+		if c, ok := categoryCache[categoryID]; ok {
+			categoryMu.RUnlock()
+			return c, nil
+		}
+	}
+	categoryMu.RUnlock()
+
+	// Fallback to database query if cache miss
 	err = sqlx.GetContext(ctx, q, &category, "SELECT * FROM `categories` WHERE `id` = ?", categoryID)
 	if category.ParentID != 0 {
 		parentCategory, err := getCategoryByID(ctx, q, category.ParentID)
@@ -532,6 +578,13 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Print(err)
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	// Reload category cache after initialization
+	if err := loadCategories(ctx); err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "failed to load categories")
 		return
 	}
 
