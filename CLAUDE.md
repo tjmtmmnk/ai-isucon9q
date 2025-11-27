@@ -14,9 +14,7 @@ ISUCON9-qualify is the qualification round application for ISUCON9 (Iikanjini Sp
 make
 
 # Run benchmarker against target
-./bin/benchmarker -target-url https://203.0.113.1 -target-host isucari.t.isucon.pw \
-  -data-dir initial-data/ -static-dir webapp/public/static/ \
-  -payment-url https://bp.t.isucon.pw -shipment-url https://bs.t.isucon.pw
+docker container run -p 5678:5678 -p 7890:7890 -i isucari-benchmarker /bin/benchmarker -target-url http://host.docker.internal -data-dir /initial-data -static-dir /static -payment-url http://host.docker.internal:5678 -payment-port 5678 -shipment-url http://host.docker.internal:7890 -shipment-port 7890
 ```
 
 ### Application Setup
