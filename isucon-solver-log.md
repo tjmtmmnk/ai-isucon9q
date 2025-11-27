@@ -54,3 +54,17 @@
 - **Cumulative: 1810 → 2210 (+22%)**
 - User queries eliminated from top 20 (was 43,687 executions, 73,320ms)
 
+### Optimization 3: Database Indexes for Items Table
+- **Implementation**: Add composite indexes for common query patterns
+- **Changes**: `webapp/sql/01_schema.sql`
+  - Added `idx_status_created_id (status, created_at, id)` for new items queries
+  - Added `idx_seller_status_created_id (seller_id, status, created_at, id)` for user items queries
+  - Added `idx_buyer_created_id (buyer_id, created_at, id)` for transaction queries
+- **Also fixed**: `getUserSimpleByID()` to always use cache (was bypassing cache in transactions)
+
+#### Results After Optimization 3
+- **Score: 2610 (+400, +18%)**
+- **Cumulative: 1810 → 2610 (+44%)**
+- Items queries now use indexes instead of full table scans
+- Previous slow queries (P95 ~1200ms) now significantly faster
+

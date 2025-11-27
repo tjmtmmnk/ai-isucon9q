@@ -452,28 +452,15 @@ func getUser(ctx context.Context, r *http.Request) (user User, errCode int, errM
 }
 
 func getUserSimpleByID(ctx context.Context, q sqlx.QueryerContext, userID int64) (userSimple UserSimple, err error) {
-	// Try cache first (only for dbx, not for transactions)
-	if q == dbx {
-		user, err := getUserByIDFromCache(ctx, userID)
-		if err != nil {
-			return userSimple, err
-		}
-		userSimple.ID = user.ID
-		userSimple.AccountName = user.AccountName
-		userSimple.NumSellItems = user.NumSellItems
-		return userSimple, nil
-	}
-
-	// For transactions, query directly
-	user := User{}
-	err = sqlx.GetContext(ctx, q, &user, "SELECT * FROM `users` WHERE `id` = ?", userID)
+	// Always use cache for user lookups - safe for read-only display purposes
+	user, err := getUserByIDFromCache(ctx, userID)
 	if err != nil {
 		return userSimple, err
 	}
 	userSimple.ID = user.ID
 	userSimple.AccountName = user.AccountName
 	userSimple.NumSellItems = user.NumSellItems
-	return userSimple, err
+	return userSimple, nil
 }
 
 func loadUsers(ctx context.Context) error {
