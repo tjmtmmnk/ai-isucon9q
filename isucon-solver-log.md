@@ -39,3 +39,18 @@
 - **Score: 2010 (+200, +11%)**
 - Category queries eliminated from top queries (was 105,857 executions → now 10 cache loads)
 
+### Optimization 2: User Caching
+- **Implementation**: Cache users in memory with cache invalidation on updates
+- **Changes**: `webapp/go/main.go`
+  - Added `userCache` map with RWMutex
+  - Added `loadUsers()` function to load all users into cache
+  - Added `getUserByIDFromCache()` function for cache-first lookups
+  - Added `setUserCache()` function for cache updates
+  - Modified `getUserSimpleByID()` to use cache when not in transaction
+  - Updated `postRegister()`, `postSell()`, `postBump()` to update cache
+
+#### Results After Optimization 2
+- **Score: 2210 (+200, +10%)**
+- **Cumulative: 1810 → 2210 (+22%)**
+- User queries eliminated from top 20 (was 43,687 executions, 73,320ms)
+

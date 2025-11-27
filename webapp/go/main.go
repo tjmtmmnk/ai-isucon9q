@@ -72,6 +72,8 @@ var (
 	store           sessions.Store
 	categoryCache   map[int]Category
 	categoryMu      sync.RWMutex
+	userCache       map[int64]User
+	userMu          sync.RWMutex
 )
 
 type Config struct {
@@ -353,9 +355,12 @@ func main() {
 	}
 	defer dbx.Close()
 
-	// Load category cache at startup
+	// Load caches at startup
 	if err := loadCategories(ctx); err != nil {
 		log.Printf("failed to load categories at startup: %v", err)
+	}
+	if err := loadUsers(ctx); err != nil {
+		log.Printf("failed to load users at startup: %v", err)
 	}
 
 	root, err := os.OpenRoot("../public")
@@ -447,6 +452,19 @@ func getUser(ctx context.Context, r *http.Request) (user User, errCode int, errM
 }
 
 func getUserSimpleByID(ctx context.Context, q sqlx.QueryerContext, userID int64) (userSimple UserSimple, err error) {
+	// Try cache first (only for dbx, not for transactions)
+	if q == dbx {
+		user, err := getUserByIDFromCache(ctx, userID)
+		if err != nil {
+			return userSimple, err
+		}
+		userSimple.ID = user.ID
+		userSimple.AccountName = user.AccountName
+		userSimple.NumSellItems = user.NumSellItems
+		return userSimple, nil
+	}
+
+	// For transactions, query directly
 	user := User{}
 	err = sqlx.GetContext(ctx, q, &user, "SELECT * FROM `users` WHERE `id` = ?", userID)
 	if err != nil {
@@ -456,6 +474,58 @@ func getUserSimpleByID(ctx context.Context, q sqlx.QueryerContext, userID int64)
 	userSimple.AccountName = user.AccountName
 	userSimple.NumSellItems = user.NumSellItems
 	return userSimple, err
+}
+
+func loadUsers(ctx context.Context) error {
+	users := []User{}
+	err := dbx.SelectContext(ctx, &users, "SELECT * FROM `users`")
+	if err != nil {
+		return err
+	}
+
+	userMu.Lock()
+	defer userMu.Unlock()
+
+	userCache = make(map[int64]User, len(users))
+	for _, u := range users {
+		userCache[u.ID] = u
+	}
+
+	return nil
+}
+
+func getUserByIDFromCache(ctx context.Context, userID int64) (User, error) {
+	userMu.RLock()
+	if userCache != nil {
+		if u, ok := userCache[userID]; ok {
+			userMu.RUnlock()
+			return u, nil
+		}
+	}
+	userMu.RUnlock()
+
+	// Cache miss - fetch from DB and cache
+	user := User{}
+	err := dbx.GetContext(ctx, &user, "SELECT * FROM `users` WHERE `id` = ?", userID)
+	if err != nil {
+		return user, err
+	}
+
+	userMu.Lock()
+	if userCache != nil {
+		userCache[userID] = user
+	}
+	userMu.Unlock()
+
+	return user, nil
+}
+
+func setUserCache(user User) {
+	userMu.Lock()
+	defer userMu.Unlock()
+	if userCache != nil {
+		userCache[user.ID] = user
+	}
 }
 
 func loadCategories(ctx context.Context) error {
@@ -581,10 +651,15 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reload category cache after initialization
+	// Reload caches after initialization
 	if err := loadCategories(ctx); err != nil {
 		log.Print(err)
 		outputErrorMsg(w, http.StatusInternalServerError, "failed to load categories")
+		return
+	}
+	if err := loadUsers(ctx); err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "failed to load users")
 		return
 	}
 
@@ -2130,6 +2205,11 @@ func postSell(w http.ResponseWriter, r *http.Request) {
 	}
 	tx.Commit()
 
+	// Update user cache
+	seller.NumSellItems++
+	seller.LastBump = now
+	setUserCache(seller)
+
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(resSell{ID: itemID})
 }
@@ -2239,6 +2319,10 @@ func postBump(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tx.Commit()
+
+	// Update user cache
+	seller.LastBump = now
+	setUserCache(seller)
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(&resItemEdit{
@@ -2384,10 +2468,15 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := User{
-		ID:          userID,
-		AccountName: accountName,
-		Address:     address,
+		ID:             userID,
+		AccountName:    accountName,
+		HashedPassword: hashedPassword,
+		Address:        address,
+		NumSellItems:   0,
 	}
+
+	// Update user cache
+	setUserCache(u)
 
 	session := getSession(r)
 	session.Values["user_id"] = u.ID
