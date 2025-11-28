@@ -899,35 +899,48 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var sqlQuery string
-	var args []any
+	items := []Item{}
 	if itemID > 0 && createdAt > 0 {
-		// paging - use BETWEEN for efficient range query on consecutive category IDs
-		sqlQuery = "SELECT `id`,`seller_id`,`status`,`name`,`price`,`image_name`,`category_id`,`created_at` FROM `items` WHERE `status` IN (?,?) AND `category_id` >= ? AND `category_id` <= ? AND (`created_at` < ? OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?"
-		args = []any{
+		// paging - use UNION to leverage index for each status separately
+		err = dbx.SelectContext(ctx, &items,
+			"(SELECT `id`,`seller_id`,`status`,`name`,`price`,`image_name`,`category_id`,`created_at` FROM `items` WHERE `status` = ? AND `category_id` >= ? AND `category_id` <= ? AND (`created_at` < ? OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?) "+
+				"UNION ALL "+
+				"(SELECT `id`,`seller_id`,`status`,`name`,`price`,`image_name`,`category_id`,`created_at` FROM `items` WHERE `status` = ? AND `category_id` >= ? AND `category_id` <= ? AND (`created_at` < ? OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?) "+
+				"ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
 			ItemStatusOnSale,
+			minCategoryID,
+			maxCategoryID,
+			time.Unix(createdAt, 0),
+			time.Unix(createdAt, 0),
+			itemID,
+			ItemsPerPage+1,
 			ItemStatusSoldOut,
 			minCategoryID,
 			maxCategoryID,
 			time.Unix(createdAt, 0),
 			time.Unix(createdAt, 0),
 			itemID,
-			ItemsPerPage + 1,
-		}
+			ItemsPerPage+1,
+			ItemsPerPage+1,
+		)
 	} else {
-		// 1st page - use BETWEEN for efficient range query on consecutive category IDs
-		sqlQuery = "SELECT `id`,`seller_id`,`status`,`name`,`price`,`image_name`,`category_id`,`created_at` FROM `items` WHERE `status` IN (?,?) AND `category_id` >= ? AND `category_id` <= ? ORDER BY `created_at` DESC, `id` DESC LIMIT ?"
-		args = []any{
+		// 1st page - use UNION to leverage index for each status separately
+		err = dbx.SelectContext(ctx, &items,
+			"(SELECT `id`,`seller_id`,`status`,`name`,`price`,`image_name`,`category_id`,`created_at` FROM `items` WHERE `status` = ? AND `category_id` >= ? AND `category_id` <= ? ORDER BY `created_at` DESC, `id` DESC LIMIT ?) "+
+				"UNION ALL "+
+				"(SELECT `id`,`seller_id`,`status`,`name`,`price`,`image_name`,`category_id`,`created_at` FROM `items` WHERE `status` = ? AND `category_id` >= ? AND `category_id` <= ? ORDER BY `created_at` DESC, `id` DESC LIMIT ?) "+
+				"ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
 			ItemStatusOnSale,
+			minCategoryID,
+			maxCategoryID,
+			ItemsPerPage+1,
 			ItemStatusSoldOut,
 			minCategoryID,
 			maxCategoryID,
-			ItemsPerPage + 1,
-		}
+			ItemsPerPage+1,
+			ItemsPerPage+1,
+		)
 	}
-
-	items := []Item{}
-	err = dbx.SelectContext(ctx, &items, sqlQuery, args...)
 
 	if err != nil {
 		log.Print(err)

@@ -321,3 +321,20 @@
 - Items listing endpoints significantly faster
 - System can handle higher load with reduced query time
 
+### Optimization 21: Use UNION for getNewCategoryItems
+- **Implementation**: Replace `status IN (?,?)` with UNION of two separate queries in `getNewCategoryItems`
+- **Rationale**: Same issue as Optimization 20 - MySQL query planner chose inefficient plan when using `status IN (?,?)`. Each subquery in UNION can use index efficiently.
+- **Changes**: `webapp/go/main.go`
+  - Modified `getNewCategoryItems()` to use UNION ALL with separate status queries
+  - Each subquery includes `category_id >= ? AND category_id <= ?` condition
+- **How to discover**: Mackerel DB Query Stats showed `SELECT ... FROM items WHERE status IN (?,?) AND category_id >= ?...` with P95 196ms (1095 executions). This was the slowest query.
+
+#### Results After Optimization 21
+- **Score: 13060** (raw: 15060, penalty: 2000)
+- **Improvement: 8560 → 13060 (+4500, +53%)**
+- **Cumulative: 1810 → 13060 (+621%)**
+- Category items queries significantly faster
+- Some errors occurred under high load:
+  - "/users/transactions.json の商品数が正しくありません" (3 errors)
+  - "購入されたはずなのに記録されていません" (1 error - timeout related)
+
