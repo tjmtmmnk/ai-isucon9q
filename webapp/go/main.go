@@ -1930,6 +1930,34 @@ func postShipDone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Query shipping record BEFORE transaction to get reserve_id
+	shipping := Shipping{}
+	err = dbx.GetContext(ctx, &shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
+	if err == sql.ErrNoRows {
+		outputErrorMsg(w, http.StatusNotFound, "shippings not found")
+		return
+	}
+	if err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	// Make API call BEFORE starting transaction to avoid holding locks during slow API calls
+	ssr, err := APIShipmentStatus(ctx, getShipmentServiceURL(ctx), &APIShipmentStatusReq{
+		ReserveID: shipping.ReserveID,
+	})
+	if err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+		return
+	}
+
+	if !(ssr.Status == ShippingsStatusShipping || ssr.Status == ShippingsStatusDone) {
+		outputErrorMsg(w, http.StatusForbidden, "shipment service側で配送中か配送完了になっていません")
+		return
+	}
+
 	tx := dbx.MustBeginTx(ctx, nil)
 
 	item := Item{}
@@ -1967,37 +1995,6 @@ func postShipDone(w http.ResponseWriter, r *http.Request) {
 
 	if transactionEvidence.Status != TransactionEvidenceStatusWaitShipping {
 		outputErrorMsg(w, http.StatusForbidden, "準備ができていません")
-		tx.Rollback()
-		return
-	}
-
-	shipping := Shipping{}
-	err = tx.GetContext(ctx, &shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ? FOR UPDATE", transactionEvidence.ID)
-	if err == sql.ErrNoRows {
-		outputErrorMsg(w, http.StatusNotFound, "shippings not found")
-		tx.Rollback()
-		return
-	}
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		tx.Rollback()
-		return
-	}
-
-	ssr, err := APIShipmentStatus(ctx, getShipmentServiceURL(ctx), &APIShipmentStatusReq{
-		ReserveID: shipping.ReserveID,
-	})
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-		tx.Rollback()
-
-		return
-	}
-
-	if !(ssr.Status == ShippingsStatusShipping || ssr.Status == ShippingsStatusDone) {
-		outputErrorMsg(w, http.StatusForbidden, "shipment service側で配送中か配送完了になっていません")
 		tx.Rollback()
 		return
 	}
@@ -2077,6 +2074,30 @@ func postComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Query shipping record BEFORE transaction to get reserve_id
+	shipping := Shipping{}
+	err = dbx.GetContext(ctx, &shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
+	if err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	// Make API call BEFORE starting transaction to avoid holding locks during slow API calls
+	ssr, err := APIShipmentStatus(ctx, getShipmentServiceURL(ctx), &APIShipmentStatusReq{
+		ReserveID: shipping.ReserveID,
+	})
+	if err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+		return
+	}
+
+	if !(ssr.Status == ShippingsStatusDone) {
+		outputErrorMsg(w, http.StatusBadRequest, "shipment service側で配送完了になっていません")
+		return
+	}
+
 	tx := dbx.MustBeginTx(ctx, nil)
 	item := Item{}
 	err = tx.GetContext(ctx, &item, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
@@ -2113,32 +2134,6 @@ func postComplete(w http.ResponseWriter, r *http.Request) {
 
 	if transactionEvidence.Status != TransactionEvidenceStatusWaitDone {
 		outputErrorMsg(w, http.StatusForbidden, "準備ができていません")
-		tx.Rollback()
-		return
-	}
-
-	shipping := Shipping{}
-	err = tx.GetContext(ctx, &shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ? FOR UPDATE", transactionEvidence.ID)
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		tx.Rollback()
-		return
-	}
-
-	ssr, err := APIShipmentStatus(ctx, getShipmentServiceURL(ctx), &APIShipmentStatusReq{
-		ReserveID: shipping.ReserveID,
-	})
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-		tx.Rollback()
-
-		return
-	}
-
-	if !(ssr.Status == ShippingsStatusDone) {
-		outputErrorMsg(w, http.StatusBadRequest, "shipment service側で配送完了になっていません")
 		tx.Rollback()
 		return
 	}

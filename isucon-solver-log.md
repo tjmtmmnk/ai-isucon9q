@@ -131,3 +131,42 @@
 - **Score: 4950** (variance due to timeout errors)
 - Note: This optimization eliminates DB queries but the impact is small compared to other bottlenecks (items queries with P95 965-1192ms, external API calls)
 
+## 2025-11-28
+
+### Session Start
+- Previous score: 3550 (with timeout errors and final check failures)
+
+### Bottleneck Analysis (Mackerel)
+
+#### HTTP Server Stats (Top endpoints by P95)
+| Endpoint | P95 (ms) | Requests | Error% |
+|---|---|---|---|
+| POST /initialize | 5290 | 5 | 0% |
+| POST /ship_done | 1185 | 288 | 3.8% |
+| POST /complete | 1164 | 241 | 1.7% |
+| GET /new_items.json | 1164 | 410 | 2.4% |
+| POST /buy | 1106 | 311 | 2.3% |
+| POST /ship | 1103 | 275 | 3.3% |
+
+#### Key Observation
+- High error rates on transaction endpoints (ship_done 3.8%, ship 3.3%)
+- Final check failures: "購入されたはずなのに記録されていません" (items not recorded as purchased)
+
+### Optimization 8: Move External API Calls Outside DB Transactions
+- **Implementation**: Move `APIShipmentStatus` calls before starting DB transaction in `postShipDone` and `postComplete`
+- **Rationale**: External API calls were made while holding database locks (`FOR UPDATE`), causing:
+  - Long lock hold times during slow API responses
+  - Other requests blocked on the same rows
+  - Timeouts and errors leading to inconsistent state
+- **Changes**: `webapp/go/main.go`
+  - `postShipDone`: Query shipping record before transaction, make API call, then start transaction for updates
+  - `postComplete`: Same pattern - API call before transaction
+  - Removed redundant `SELECT ... FOR UPDATE` on shippings table (only UPDATE needed)
+- **How to discover**: Mackerel HTTP Server Stats showed POST /ship_done with 3.8% error rate and POST /complete with 1.7% error rate. Code review revealed API calls inside transaction blocks holding locks.
+
+#### Results After Optimization 8
+- **Score: 4850 (+1300 from 3550, +37%)**
+- **No final check failures** (previously had "購入されたはずなのに記録されていません")
+- Transaction completion reliability improved
+- Reduced lock contention during external API calls
+
