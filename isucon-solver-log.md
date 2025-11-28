@@ -204,3 +204,24 @@
 - **Cumulative: 1810 → ~6500 average (+260%)**
 - Significant reduction in item query I/O by excluding TEXT column
 
+### Optimization 12: Move External API Calls Outside DB Transaction in postBuy
+- **Implementation**: Refactor `postBuy` to make external API calls before starting the database transaction
+- **Rationale**: The original implementation held database locks (`FOR UPDATE` on items and users) while making slow external API calls (500-1000ms). This caused:
+  - Long lock hold times blocking other buy requests
+  - Timeouts and errors leading to inconsistent state
+  - Final check failures ("購入されたはずなのに記録されていません")
+- **Changes**: `webapp/go/main.go`
+  - Read item and seller info without lock initially
+  - Make parallel external API calls (shipment + payment) before transaction
+  - Start transaction only after API calls complete
+  - Re-verify item status with `FOR UPDATE` lock before committing
+  - Lock hold time reduced from (API time + DB time) to just (DB time)
+- **How to discover**: Mackerel HTTP Server Stats showed POST /buy with 5.3% error rate (highest among transaction endpoints) and P95 of 999ms. Code analysis revealed API calls inside transaction holding locks.
+
+#### Results After Optimization 12
+- **Score: 6650** (raw: 6650, penalty: 0)
+- **Cumulative: 1810 → 6650 (+267%)**
+- **Final check errors eliminated** (previously 4 errors: "購入されたはずなのに記録されていません")
+- Lock contention significantly reduced
+- Transaction reliability improved
+

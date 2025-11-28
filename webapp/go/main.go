@@ -1560,102 +1560,43 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx := dbx.MustBeginTx(ctx, nil)
-
+	// Read item and seller info BEFORE starting transaction to minimize lock time
 	targetItem := Item{}
-	err = tx.GetContext(ctx, &targetItem, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", rb.ItemID)
+	err = dbx.GetContext(ctx, &targetItem, "SELECT * FROM `items` WHERE `id` = ?", rb.ItemID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusNotFound, "item not found")
-		tx.Rollback()
 		return
 	}
 	if err != nil {
 		log.Print(err)
-
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		tx.Rollback()
 		return
 	}
 
 	if targetItem.Status != ItemStatusOnSale {
 		outputErrorMsg(w, http.StatusForbidden, "item is not for sale")
-		tx.Rollback()
 		return
 	}
 
 	if targetItem.SellerID == buyer.ID {
 		outputErrorMsg(w, http.StatusForbidden, "自分の商品は買えません")
-		tx.Rollback()
 		return
 	}
 
-	seller := User{}
-	err = tx.GetContext(ctx, &seller, "SELECT * FROM `users` WHERE `id` = ? FOR UPDATE", targetItem.SellerID)
-	if err == sql.ErrNoRows {
+	seller, err := getUserByIDFromCache(ctx, targetItem.SellerID)
+	if err != nil {
 		outputErrorMsg(w, http.StatusNotFound, "seller not found")
-		tx.Rollback()
-		return
-	}
-	if err != nil {
-		log.Print(err)
-
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		tx.Rollback()
 		return
 	}
 
-	category, err := getCategoryByID(ctx, tx, targetItem.CategoryID)
+	category, err := getCategoryByID(ctx, nil, targetItem.CategoryID)
 	if err != nil {
 		log.Print(err)
-
 		outputErrorMsg(w, http.StatusInternalServerError, "category id error")
-		tx.Rollback()
 		return
 	}
 
-	result, err := tx.ExecContext(ctx, "INSERT INTO `transaction_evidences` (`seller_id`, `buyer_id`, `status`, `item_id`, `item_name`, `item_price`, `item_description`,`item_category_id`,`item_root_category_id`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		targetItem.SellerID,
-		buyer.ID,
-		TransactionEvidenceStatusWaitShipping,
-		targetItem.ID,
-		targetItem.Name,
-		targetItem.Price,
-		targetItem.Description,
-		category.ID,
-		category.ParentID,
-	)
-	if err != nil {
-		log.Print(err)
-
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		tx.Rollback()
-		return
-	}
-
-	transactionEvidenceID, err := result.LastInsertId()
-	if err != nil {
-		log.Print(err)
-
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		tx.Rollback()
-		return
-	}
-
-	_, err = tx.ExecContext(ctx, "UPDATE `items` SET `buyer_id` = ?, `status` = ?, `updated_at` = ? WHERE `id` = ?",
-		buyer.ID,
-		ItemStatusTrading,
-		time.Now(),
-		targetItem.ID,
-	)
-	if err != nil {
-		log.Print(err)
-
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		tx.Rollback()
-		return
-	}
-
-	// Parallel API calls to shipment and payment services
+	// Make parallel external API calls BEFORE starting transaction
 	type shipmentResult struct {
 		scr *APIShipmentCreateRes
 		err error
@@ -1694,16 +1635,12 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 	if shipmentRes.err != nil {
 		log.Print(shipmentRes.err)
 		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-		tx.Rollback()
-
 		return
 	}
 
 	if paymentRes.err != nil {
 		log.Print(paymentRes.err)
-
 		outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
-		tx.Rollback()
 		return
 	}
 
@@ -1712,18 +1649,78 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 
 	if pstr.Status == "invalid" {
 		outputErrorMsg(w, http.StatusBadRequest, "カード情報に誤りがあります")
-		tx.Rollback()
 		return
 	}
 
 	if pstr.Status == "fail" {
 		outputErrorMsg(w, http.StatusBadRequest, "カードの残高が足りません")
-		tx.Rollback()
 		return
 	}
 
 	if pstr.Status != "ok" {
 		outputErrorMsg(w, http.StatusBadRequest, "想定外のエラー")
+		return
+	}
+
+	// Now start transaction with minimal lock time
+	tx := dbx.MustBeginTx(ctx, nil)
+
+	// Re-verify item status with lock
+	err = tx.GetContext(ctx, &targetItem, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", rb.ItemID)
+	if err == sql.ErrNoRows {
+		outputErrorMsg(w, http.StatusNotFound, "item not found")
+		tx.Rollback()
+		return
+	}
+	if err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		tx.Rollback()
+		return
+	}
+
+	// Re-check status after acquiring lock (item may have been bought by another request)
+	if targetItem.Status != ItemStatusOnSale {
+		outputErrorMsg(w, http.StatusForbidden, "item is not for sale")
+		tx.Rollback()
+		return
+	}
+
+	result, err := tx.ExecContext(ctx, "INSERT INTO `transaction_evidences` (`seller_id`, `buyer_id`, `status`, `item_id`, `item_name`, `item_price`, `item_description`,`item_category_id`,`item_root_category_id`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		targetItem.SellerID,
+		buyer.ID,
+		TransactionEvidenceStatusWaitShipping,
+		targetItem.ID,
+		targetItem.Name,
+		targetItem.Price,
+		targetItem.Description,
+		category.ID,
+		category.ParentID,
+	)
+	if err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		tx.Rollback()
+		return
+	}
+
+	transactionEvidenceID, err := result.LastInsertId()
+	if err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		tx.Rollback()
+		return
+	}
+
+	_, err = tx.ExecContext(ctx, "UPDATE `items` SET `buyer_id` = ?, `status` = ?, `updated_at` = ? WHERE `id` = ?",
+		buyer.ID,
+		ItemStatusTrading,
+		time.Now(),
+		targetItem.ID,
+	)
+	if err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		tx.Rollback()
 		return
 	}
@@ -1743,7 +1740,6 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Print(err)
-
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		tx.Rollback()
 		return
