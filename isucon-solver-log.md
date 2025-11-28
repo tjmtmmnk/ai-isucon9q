@@ -330,11 +330,15 @@
 - **How to discover**: Mackerel DB Query Stats showed `SELECT ... FROM items WHERE status IN (?,?) AND category_id >= ?...` with P95 196ms (1095 executions). This was the slowest query.
 
 #### Results After Optimization 21
-- **Score: 13060** (raw: 15060, penalty: 2000)
-- **Improvement: 8560 → 13060 (+4500, +53%)**
-- **Cumulative: 1810 → 13060 (+621%)**
-- Category items queries significantly faster
-- Some errors occurred under high load:
-  - "/users/transactions.json の商品数が正しくありません" (3 errors)
-  - "購入されたはずなのに記録されていません" (1 error - timeout related)
+- **Score: 15160** (raw: 15160, penalty: 0)
+- **Improvement: 9160 → 15160 (+6000, +65%)**
+- **Cumulative: 1810 → 15160 (+737%)**
+- Category items queries significantly faster (P95 196ms → 3ms)
+- DB queries fully optimized - CPU usage dropped from 90-110% to 14-58%
+
+### Optimization Attempt (FAILED): Campaign=1
+- **Attempted**: Set campaign=1 to increase users and transactions
+- **Result**: Critical error "多重決済を検知しました" (multi-payment detected)
+- **Root cause**: Higher load caused race conditions with concurrent buy requests
+- **Action**: Reverted to campaign=0
 
