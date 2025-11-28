@@ -34,6 +34,7 @@
   - Added `loadCategories()` function to load all categories into cache
   - Modified `getCategoryByID()` to use cache first
   - Called `loadCategories()` in `main()` and `postInitialize()`
+- **How to discover**: Mackerel DB Query Stats
 
 #### Results After Optimization 1
 - **Score: 2010 (+200, +11%)**
@@ -48,6 +49,7 @@
   - Added `setUserCache()` function for cache updates
   - Modified `getUserSimpleByID()` to use cache when not in transaction
   - Updated `postRegister()`, `postSell()`, `postBump()` to update cache
+- **How to discover**: Mackerel DB Query Stats
 
 #### Results After Optimization 2
 - **Score: 2210 (+200, +10%)**
@@ -61,6 +63,7 @@
   - Added `idx_seller_status_created_id (seller_id, status, created_at, id)` for user items queries
   - Added `idx_buyer_created_id (buyer_id, created_at, id)` for transaction queries
 - **Also fixed**: `getUserSimpleByID()` to always use cache (was bypassing cache in transactions)
+- **How to discover**: Mackerel DB Query Stats
 
 #### Results After Optimization 3
 - **Score: 2610 (+400, +18%)**
@@ -75,61 +78,11 @@
   - Modified `getTransactions()` to check `shipping.Status` before calling external API
   - If status is `ShippingsStatusDone`, use DB value directly instead of calling API
   - This eliminates N external API calls for completed transactions
+- **How to discover**: Mackerel HTTP Server Stats
 
 #### Results After Optimization 4
 - **Score: 4550 (+1940, +74%)**
 - **Cumulative: 1810 → 4550 (+151%)**
 - Significant reduction in external API calls during transaction listing
 - One timeout error occurred (-500 penalty) during high load
-
-### Optimization 5: Config Caching (in progress)
-- **Implementation**: Cache payment/shipment service URLs in memory
-- **Changes**: `webapp/go/main.go`
-  - Added `paymentServiceURL`, `shipmentServiceURL` variables with mutex
-  - Added `loadConfigs()` function to load config values at startup
-  - Modified `getPaymentServiceURL()` and `getShipmentServiceURL()` to use cache
-  - Updated `postInitialize()` to set config cache directly
-- **Status**: Implemented but not yet committed
-
----
-
-## Next Steps (TODO)
-
-### High Priority Optimizations
-
-1. **getTransactions N+1 Query Elimination**
-   - Current: Individual queries for `transaction_evidences` and `shippings` per item
-   - Solution: Bulk query by item IDs, then map results
-   - Expected impact: Significant latency reduction
-
-2. **Parallel External API Calls**
-   - Current: Sequential API calls for non-done shipping status in getTransactions
-   - Solution: Use goroutines to parallelize API calls
-   - Expected impact: Reduce total API call time from sum to max
-
-3. **bcrypt Cost Reduction** (Consider carefully)
-   - Current: BcryptCost = 10 (default)
-   - Solution: Reduce to 4-6 for faster login
-   - Risk: Security implications, but common in ISUCON
-
-### Medium Priority Optimizations
-
-4. **Remove Unnecessary Transactions**
-   - `getTransactions` uses a transaction for read-only operations
-   - Could potentially remove for better concurrency
-
-5. **getUser Cache Usage**
-   - `getUser()` always queries DB for session validation
-   - Could use userCache after initial validation
-
-6. **Campaign Setting**
-   - Manual.md mentions campaign settings (0-4) affect user count
-   - Higher campaign = more users = more transactions = higher score
-   - But also more load, so timing is important
-
-### Current Bottlenecks (from last benchmark)
-- POST /login - bcrypt is CPU intensive
-- GET /users/transactions.json - still slow despite optimizations
-- POST /buy, POST /ship - external API call overhead
-- Various endpoints timing out under high load
 
