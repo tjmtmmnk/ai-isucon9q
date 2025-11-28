@@ -256,3 +256,32 @@
 - Static file serving offloaded from Go app to nginx
 - Reduced connection overhead with keepalive
 
+### Optimization Attempt 18 (FAILED): Parallel APIShipmentStatus in getTransactions
+- **Attempted Implementation**: Parallelize `APIShipmentStatus` API calls in `getTransactions` using goroutines
+- **Rationale**: Mackerel HTTP Server Stats showed GET /users/transactions.json with P95 of 986ms (257 requests). Sequential API calls for non-done shippings were identified as a potential bottleneck.
+- **Changes**:
+  - Collected all shippings that need API calls (status != ShippingsStatusDone)
+  - Made all API calls in parallel using goroutines and channels
+  - Stored results in a map for later use in the main loop
+- **How to discover**: Mackerel HTTP Server Stats showed GET /users/transactions.json as one of the slowest endpoints with P95 986ms
+
+#### Results After Optimization Attempt 18
+- **Score: 2950** (raw: 5950, penalty: 3000)
+- **6 final check failures**: "購入されたはずなのに記録されていません" (purchases should have been recorded but weren't)
+- **Root cause analysis**: Parallel API calls likely caused resource contention or race conditions, leading to transaction failures
+- **Action**: Reverted the change
+
+### Optimization 18: Database Connection Pool Settings
+- **Implementation**: Add connection pool settings to optimize database connection handling
+- **Rationale**: No explicit connection pool settings were configured; system was CPU-bound with loadavg ~3.0
+- **Changes**: `webapp/go/main.go`
+  - Added `SetMaxOpenConns(50)` - limit maximum open connections
+  - Added `SetMaxIdleConns(25)` - keep idle connections for reuse
+  - Added `SetConnMaxLifetime(5 * time.Minute)` - prevent stale connections
+- **How to discover**: Grep search for connection pool settings found none configured. Mackerel Host Metrics showed CPU usage at 94% during benchmark.
+
+#### Results After Optimization 18
+- **Score: 6550** (within variance range of 6550-7560)
+- Impact: Neutral to slight improvement (helps with connection reuse under load)
+- Stability: No final check failures
+

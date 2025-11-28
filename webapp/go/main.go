@@ -359,6 +359,11 @@ func main() {
 	}
 	defer dbx.Close()
 
+	// Optimize connection pool settings
+	dbx.SetMaxOpenConns(50)
+	dbx.SetMaxIdleConns(25)
+	dbx.SetConnMaxLifetime(5 * time.Minute)
+
 	// Load caches at startup
 	if err := loadCategories(ctx); err != nil {
 		log.Printf("failed to load categories at startup: %v", err)
