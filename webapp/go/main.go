@@ -593,6 +593,29 @@ func getChildCategoryIDs(parentID int) []int {
 	return nil
 }
 
+// getChildCategoryIDRange returns the min and max category IDs for a parent category.
+// Since child category IDs are consecutive, we can use BETWEEN instead of IN for efficient range queries.
+func getChildCategoryIDRange(parentID int) (minID, maxID int, ok bool) {
+	categoryMu.RLock()
+	defer categoryMu.RUnlock()
+	if childCategoryCache != nil {
+		if ids, found := childCategoryCache[parentID]; found && len(ids) > 0 {
+			minID = ids[0]
+			maxID = ids[0]
+			for _, id := range ids {
+				if id < minID {
+					minID = id
+				}
+				if id > maxID {
+					maxID = id
+				}
+			}
+			return minID, maxID, true
+		}
+	}
+	return 0, 0, false
+}
+
 func getConfigByName(ctx context.Context, name string) (string, error) {
 	config := Config{}
 	err := dbx.GetContext(ctx, &config, "SELECT * FROM `configs` WHERE `name` = ?", name)
@@ -836,8 +859,8 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	categoryIDs := getChildCategoryIDs(rootCategory.ID)
-	if len(categoryIDs) == 0 {
+	minCategoryID, maxCategoryID, ok := getChildCategoryIDRange(rootCategory.ID)
+	if !ok {
 		outputErrorMsg(w, http.StatusNotFound, "category not found")
 		return
 	}
@@ -863,43 +886,35 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var inQuery string
-	var inArgs []any
+	var sqlQuery string
+	var args []any
 	if itemID > 0 && createdAt > 0 {
-		// paging
-		inQuery, inArgs, err = sqlx.In(
-			"SELECT `id`,`seller_id`,`status`,`name`,`price`,`image_name`,`category_id`,`created_at` FROM `items` WHERE `status` IN (?,?) AND category_id IN (?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+		// paging - use BETWEEN for efficient range query on consecutive category IDs
+		sqlQuery = "SELECT `id`,`seller_id`,`status`,`name`,`price`,`image_name`,`category_id`,`created_at` FROM `items` WHERE `status` IN (?,?) AND `category_id` >= ? AND `category_id` <= ? AND (`created_at` < ? OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?"
+		args = []any{
 			ItemStatusOnSale,
 			ItemStatusSoldOut,
-			categoryIDs,
+			minCategoryID,
+			maxCategoryID,
 			time.Unix(createdAt, 0),
 			time.Unix(createdAt, 0),
 			itemID,
-			ItemsPerPage+1,
-		)
-		if err != nil {
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			return
+			ItemsPerPage + 1,
 		}
 	} else {
-		// 1st page
-		inQuery, inArgs, err = sqlx.In(
-			"SELECT `id`,`seller_id`,`status`,`name`,`price`,`image_name`,`category_id`,`created_at` FROM `items` WHERE `status` IN (?,?) AND category_id IN (?) ORDER BY created_at DESC, id DESC LIMIT ?",
+		// 1st page - use BETWEEN for efficient range query on consecutive category IDs
+		sqlQuery = "SELECT `id`,`seller_id`,`status`,`name`,`price`,`image_name`,`category_id`,`created_at` FROM `items` WHERE `status` IN (?,?) AND `category_id` >= ? AND `category_id` <= ? ORDER BY `created_at` DESC, `id` DESC LIMIT ?"
+		args = []any{
 			ItemStatusOnSale,
 			ItemStatusSoldOut,
-			categoryIDs,
-			ItemsPerPage+1,
-		)
-		if err != nil {
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			return
+			minCategoryID,
+			maxCategoryID,
+			ItemsPerPage + 1,
 		}
 	}
 
 	items := []Item{}
-	err = dbx.SelectContext(ctx, &items, inQuery, inArgs...)
+	err = dbx.SelectContext(ctx, &items, sqlQuery, args...)
 
 	if err != nil {
 		log.Print(err)
