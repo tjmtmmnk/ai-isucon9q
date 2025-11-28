@@ -96,8 +96,8 @@
 - **How to discover**: Mackerel HTTP Server Stats - POST /buy had P95 of 2078ms
 
 #### Results After Optimization 5
-- **Score: ~4750-5050 (average ~4850, +300, +7%)**
-- **Cumulative: 1810 → ~4850 (+168%)**
+- **Score: 4850**
+- **Cumulative: 1810 → 4850 (+168%)**
 - Score variance observed due to timeout penalties
 - POST /buy latency reduced by eliminating sequential API wait times
 
@@ -109,11 +109,11 @@
   - Batch fetch all transaction_evidences with `WHERE item_id IN (...)`
   - Batch fetch all shippings with `WHERE transaction_evidence_id IN (...)`
   - Use maps for O(1) lookup in the main loop
-- **How to discover**: Code review of getTransactions - total time 631s with 838 requests
+- **How to discover**: Mackerel HTTP Server Stats - GET /users/transactions.json had P95 of 5668ms (slowest endpoint)
 
 #### Results After Optimization 6
-- **Score: ~5350-5950 (average ~5650, +800, +16%)**
-- **Cumulative: 1810 → ~5650 (+212%)**
+- **Score: 5650**
+- **Cumulative: 1810 → 5650 (+212%)**
 - Eliminated 2N database queries per getTransactions request
 - GET /users/transactions.json now more efficient
 
