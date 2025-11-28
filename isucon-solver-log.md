@@ -117,3 +117,17 @@
 - Eliminated 2N database queries per getTransactions request
 - GET /users/transactions.json now more efficient
 
+### Optimization 7: Child Category ID Caching
+- **Implementation**: Cache child category IDs in memory to avoid repeated DB queries
+- **Rationale**: `SELECT id FROM categories WHERE parent_id=?` was executed 612 times (N+1 problem in getNewCategoryItems)
+- **Changes**: `webapp/go/main.go`
+  - Added `childCategoryCache map[int][]int` to store parent_id -> child_ids mapping
+  - Updated `loadCategories()` to build the child category cache
+  - Added `getChildCategoryIDs(parentID int) []int` helper function
+  - Modified `getNewCategoryItems()` to use cache instead of DB query
+- **How to discover**: Mackerel DB Query Stats - SELECT id FROM categories WHERE parent_id=? was executed 612 times with P95 of 83ms
+
+#### Results After Optimization 7
+- **Score: 4950** (variance due to timeout errors)
+- Note: This optimization eliminates DB queries but the impact is small compared to other bottlenecks (items queries with P95 965-1192ms, external API calls)
+

@@ -71,6 +71,7 @@ var (
 	dbx                *sqlx.DB
 	store              sessions.Store
 	categoryCache      map[int]Category
+	childCategoryCache map[int][]int // parent_id -> child_ids
 	categoryMu         sync.RWMutex
 	userCache          map[int64]User
 	userMu             sync.RWMutex
@@ -532,8 +533,13 @@ func loadCategories(ctx context.Context) error {
 	defer categoryMu.Unlock()
 
 	categoryCache = make(map[int]Category, len(categories))
+	childCategoryCache = make(map[int][]int)
 	for _, c := range categories {
 		categoryCache[c.ID] = c
+		// Build child category cache (parent_id -> child_ids)
+		if c.ParentID != 0 {
+			childCategoryCache[c.ParentID] = append(childCategoryCache[c.ParentID], c.ID)
+		}
 	}
 
 	// Set parent category names
@@ -569,6 +575,17 @@ func getCategoryByID(ctx context.Context, q sqlx.QueryerContext, categoryID int)
 		category.ParentCategoryName = parentCategory.CategoryName
 	}
 	return category, err
+}
+
+func getChildCategoryIDs(parentID int) []int {
+	categoryMu.RLock()
+	defer categoryMu.RUnlock()
+	if childCategoryCache != nil {
+		if ids, ok := childCategoryCache[parentID]; ok {
+			return ids
+		}
+	}
+	return nil
 }
 
 func getConfigByName(ctx context.Context, name string) (string, error) {
@@ -814,11 +831,9 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var categoryIDs []int
-	err = dbx.SelectContext(ctx, &categoryIDs, "SELECT id FROM `categories` WHERE parent_id=?", rootCategory.ID)
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	categoryIDs := getChildCategoryIDs(rootCategory.ID)
+	if len(categoryIDs) == 0 {
+		outputErrorMsg(w, http.StatusNotFound, "category not found")
 		return
 	}
 
