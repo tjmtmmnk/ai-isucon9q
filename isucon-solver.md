@@ -9,8 +9,10 @@
 
 - isucon-solver-log.md に記録を残す
   - どういった情報をもとに、どのような改善案を考えたか 
-  - どのように発見したか
-    - (例) Mackerel DB Query Stats, top コマンド, pprof など
+  - どのように発見したか（ツール名だけでなく、具体的に何を観測してボトルネックと判断したかを記録する）
+    - (例) 「Mackerel HTTP Server Stats で GET /users/transactions.json の P95 が 5668ms と最も遅かった」
+    - (例) 「Mackerel DB Query Stats で SELECT * FROM categories WHERE id = ? が 105,857回実行されていた」
+    - (例) 「top コマンドで CPU 使用率が 95% に達していた」
   - 実装した改善案の内容
   - ベンチマークのスコアの変化
 - 変更を加える単位でコミットする
