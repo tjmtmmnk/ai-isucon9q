@@ -12,7 +12,7 @@
   - どのように発見したか（ツール名だけでなく、具体的に何を観測してボトルネックと判断したかを記録する）
     - (例) 「Mackerel HTTP Server Stats で GET /users/transactions.json の P95 が 5668ms と最も遅かった」
     - (例) 「Mackerel DB Query Stats で SELECT * FROM categories WHERE id = ? が 105,857回実行されていた」
-    - (例) 「top コマンドで CPU 使用率が 95% に達していた」
+    - (例) 「Mackerel Host Metrics で CPU 使用率が 95% に達していた」
   - 実装した改善案の内容
   - ベンチマークのスコアの変化
 - 変更を加える単位でコミットする
@@ -30,6 +30,7 @@
 
 ## インフラ
 - docker上で動作する
+- Mackerelの hostId は `5Cu3Vrp85x3`
 
 ## 変更対象
 - アプリケーション: webapp/go ディレクトリ以下
