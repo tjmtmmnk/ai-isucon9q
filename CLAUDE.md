@@ -6,6 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ISUCON9-qualify is the qualification round application for ISUCON9 (Iikanjini Speed Up Contest), a performance tuning competition. The application "ISUCARI" (椅子カリ) is a marketplace for buying and selling chairs.
 
+## Get current timestamp
+
+```bash
+date +%s
+```
+
 ## Key Commands
 
 ### Benchmarker
