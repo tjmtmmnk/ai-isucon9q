@@ -2465,6 +2465,17 @@ func postBump(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func getAllCategoriesFromCache() []Category {
+	categoryMu.RLock()
+	defer categoryMu.RUnlock()
+
+	categories := make([]Category, 0, len(categoryCache))
+	for _, c := range categoryCache {
+		categories = append(categories, c)
+	}
+	return categories
+}
+
 func getSettings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	csrfToken := getCSRFToken(r)
@@ -2479,15 +2490,8 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 
 	ress.PaymentServiceURL = getPaymentServiceURL(ctx)
 
-	categories := []Category{}
-
-	err := dbx.SelectContext(ctx, &categories, "SELECT * FROM `categories`")
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	ress.Categories = categories
+	// Use category cache instead of DB query
+	ress.Categories = getAllCategoriesFromCache()
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(ress)
