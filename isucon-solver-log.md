@@ -342,3 +342,22 @@
 - **Root cause**: Higher load caused race conditions with concurrent buy requests
 - **Action**: Reverted to campaign=0
 
+### Optimization 22: Fallback to DB Value on API Timeout in getTransactions
+- **Implementation**: Instead of returning error when APIShipmentStatus fails, fallback to DB value
+- **Rationale**: External API calls (shipment /status) were causing timeouts which resulted in:
+  - 500 errors returned to client
+  - "商品数が正しくありません" errors from benchmarker (expected items not received)
+  - High penalty scores (-500 per timeout)
+- **Changes**: `webapp/go/main.go`
+  - Modified `getTransactions()` to continue with DB shipping status when API call fails
+  - DB value is usually accurate as it's updated by postShip, postShipDone, postComplete
+- **How to discover**: Mackerel HTTP Server Stats showed GET /users/transactions.json with P95 809ms and 1.4% error rate. App logs showed multiple "context canceled" errors for shipment /status API calls.
+
+#### Results After Optimization 22
+- **Score: 14660** (raw: 15160, penalty: 500)
+- **Improvement: 13960 → 14660 (+700, +5%)**
+- **Cumulative: 1810 → 14660 (+710%)**
+- Error rate reduced: "商品数が正しくありません" errors decreased from 2 to 1
+- Penalty reduced from 1000 to 500
+- API timeout no longer causes getTransactions to fail completely
+

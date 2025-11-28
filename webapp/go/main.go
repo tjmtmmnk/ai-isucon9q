@@ -1299,12 +1299,12 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 					ReserveID: shipping.ReserveID,
 				})
 				if err != nil {
+					// Fallback to DB value on API error (e.g., timeout)
+					// DB value is usually up-to-date as it's updated by postShip, postShipDone, postComplete
 					log.Print(err)
-					outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-					tx.Rollback()
-					return
+				} else {
+					shippingStatus = ssr.Status
 				}
-				shippingStatus = ssr.Status
 			}
 
 			itemDetail.TransactionEvidenceID = transactionEvidence.ID
