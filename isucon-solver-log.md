@@ -101,3 +101,19 @@
 - Score variance observed due to timeout penalties
 - POST /buy latency reduced by eliminating sequential API wait times
 
+### Optimization 6: Batch Fetch in getTransactions
+- **Implementation**: Batch fetch transaction_evidences and shippings using IN clause
+- **Rationale**: N+1 problem - each item triggered individual queries for transaction_evidences and shippings
+- **Changes**: `webapp/go/main.go`
+  - Collect all item IDs upfront
+  - Batch fetch all transaction_evidences with `WHERE item_id IN (...)`
+  - Batch fetch all shippings with `WHERE transaction_evidence_id IN (...)`
+  - Use maps for O(1) lookup in the main loop
+- **How to discover**: Code review of getTransactions - total time 631s with 838 requests
+
+#### Results After Optimization 6
+- **Score: ~5350-5950 (average ~5650, +800, +16%)**
+- **Cumulative: 1810 → ~5650 (+212%)**
+- Eliminated 2N database queries per getTransactions request
+- GET /users/transactions.json now more efficient
+

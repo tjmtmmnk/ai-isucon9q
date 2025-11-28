@@ -1116,6 +1116,67 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Batch fetch transaction_evidences for all items
+	itemIDs := make([]int64, len(items))
+	for i, item := range items {
+		itemIDs[i] = item.ID
+	}
+
+	teMap := make(map[int64]TransactionEvidence)
+	shippingMap := make(map[int64]Shipping)
+
+	if len(itemIDs) > 0 {
+		transactionEvidences := []TransactionEvidence{}
+		teQuery, teArgs, err := sqlx.In("SELECT * FROM `transaction_evidences` WHERE `item_id` IN (?)", itemIDs)
+		if err != nil {
+			log.Print(err)
+			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+			tx.Rollback()
+			return
+		}
+		teQuery = tx.Rebind(teQuery)
+		err = tx.SelectContext(ctx, &transactionEvidences, teQuery, teArgs...)
+		if err != nil {
+			log.Print(err)
+			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+			tx.Rollback()
+			return
+		}
+
+		for _, te := range transactionEvidences {
+			teMap[te.ItemID] = te
+		}
+
+		// Batch fetch shippings for all transaction_evidences
+		if len(transactionEvidences) > 0 {
+			teIDs := make([]int64, len(transactionEvidences))
+			for i, te := range transactionEvidences {
+				teIDs[i] = te.ID
+			}
+
+			shippings := []Shipping{}
+			shQuery, shArgs, err := sqlx.In("SELECT * FROM `shippings` WHERE `transaction_evidence_id` IN (?)", teIDs)
+			if err != nil {
+				log.Print(err)
+				outputErrorMsg(w, http.StatusInternalServerError, "db error")
+				tx.Rollback()
+				return
+			}
+			shQuery = tx.Rebind(shQuery)
+			err = tx.SelectContext(ctx, &shippings, shQuery, shArgs...)
+			if err != nil {
+				log.Print(err)
+				outputErrorMsg(w, http.StatusInternalServerError, "db error")
+				tx.Rollback()
+				return
+			}
+
+			for _, sh := range shippings {
+				shippingMap[sh.TransactionEvidenceID] = sh
+			}
+		}
+	}
+
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
 		seller, err := getUserSimpleByID(ctx, tx, item.SellerID)
@@ -1161,27 +1222,11 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			itemDetail.Buyer = &buyer
 		}
 
-		transactionEvidence := TransactionEvidence{}
-		err = tx.GetContext(ctx, &transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
-		if err != nil && err != sql.ErrNoRows {
-			// It's able to ignore ErrNoRows
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
-
-		if transactionEvidence.ID > 0 {
-			shipping := Shipping{}
-			err = tx.GetContext(ctx, &shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
-			if err == sql.ErrNoRows {
+		transactionEvidence, hasTe := teMap[item.ID]
+		if hasTe && transactionEvidence.ID > 0 {
+			shipping, hasShipping := shippingMap[transactionEvidence.ID]
+			if !hasShipping {
 				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
-				tx.Rollback()
-				return
-			}
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "db error")
 				tx.Rollback()
 				return
 			}
