@@ -225,3 +225,19 @@
 - Lock contention significantly reduced
 - Transaction reliability improved
 
+### Optimization 13: Move External API Calls Outside DB Transaction in postShip
+- **Implementation**: Refactor `postShip` to make external API call (`APIShipmentRequest`) before starting the database transaction
+- **Rationale**: Same pattern as postBuy - the original implementation held database locks (on items, transaction_evidences, shippings) while making slow external API calls, causing lock contention
+- **Changes**: `webapp/go/main.go`
+  - Read transaction_evidence, item, and shipping data without locks initially
+  - Make `APIShipmentRequest` API call before starting transaction
+  - Start transaction only after API call completes
+  - Re-verify state with `FOR UPDATE` locks before committing
+- **How to discover**: Mackerel HTTP Server Stats showed POST /ship with P95 of 992ms
+
+#### Results After Optimization 13
+- **Score: 6350** (raw: 6850, penalty: 500)
+- Raw score improved: 6650 → 6850 (+200)
+- Penalty due to timeout variance
+- Lock hold time reduced in postShip
+
