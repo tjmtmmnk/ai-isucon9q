@@ -10,6 +10,7 @@
 - isucon-solver-log.md に記録を残す
   - どういった情報をもとに、どのような改善案を考えたか 
   - どのように発見したか（ツール名だけでなく、具体的に何を観測してボトルネックと判断したかを記録する）
+    - "Code Review" は禁止する。Code Reviewするに至った元の観測内容を記録すること 
     - (例) 「Mackerel HTTP Server Stats で GET /users/transactions.json の P95 が 5668ms と最も遅かった」
     - (例) 「Mackerel DB Query Stats で SELECT * FROM categories WHERE id = ? が 105,857回実行されていた」
     - (例) 「Mackerel Host Metrics で CPU 使用率が 95% に達していた」
