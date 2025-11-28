@@ -170,3 +170,37 @@
 - Transaction completion reliability improved
 - Reduced lock contention during external API calls
 
+### Optimization 9: Fix getUser to Use Cache
+- **Implementation**: Modify `getUser()` function to use `getUserByIDFromCache()` instead of direct DB query
+- **Rationale**: `getUser()` is called on every authenticated request (12 call sites) but was bypassing the user cache
+- **Changes**: `webapp/go/main.go`
+  - Changed `getUser()` to call `getUserByIDFromCache()` instead of direct `SELECT * FROM users WHERE id = ?`
+- **How to discover**: Mackerel DB Query Stats showed `SELECT * FROM users WHERE id = ?` with 2339 executions despite user cache being implemented
+
+#### Results After Optimization 9
+- User queries eliminated from DB query stats top 20
+- Score variance unchanged but queries reduced
+
+### Optimization 10: Add Composite Index for Category Queries
+- **Implementation**: Add index `idx_category_status_created_id (category_id, status, created_at, id)` for category-based item queries
+- **Rationale**: Category queries used `category_id IN (...)` with status and created_at, but existing index didn't include category_id
+- **Changes**: `webapp/sql/01_schema.sql`
+  - Added `INDEX idx_category_status_created_id (category_id, status, created_at, id)`
+- **How to discover**: Mackerel DB Query Stats showed category queries with P95 700-900ms
+
+#### Results After Optimization 10
+- Minor improvement in category query performance
+
+### Optimization 11: Avoid SELECT * in Item Listing Queries
+- **Implementation**: Select only necessary columns instead of `SELECT *` in getNewItems and getNewCategoryItems
+- **Rationale**: `SELECT *` retrieves `description` (TEXT field) which is not needed for item listing and adds I/O overhead
+- **Changes**: `webapp/go/main.go`
+  - Changed `getNewItems()` queries to select only: id, seller_id, status, name, price, image_name, category_id, created_at
+  - Changed `getNewCategoryItems()` queries similarly
+- **How to discover**: Mackerel DB Query Stats showed `SELECT * FROM items` queries with P95 1000-1700ms
+
+#### Results After Optimization 11
+- **Score: 5860-6860** (raw: 6750-7360 with timeout penalties)
+- **Cumulative: 1810 → ~6500 average (+260%)**
+- Significant reduction in item query I/O by excluding TEXT column
+
