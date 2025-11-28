@@ -241,3 +241,20 @@
 - Penalty due to timeout variance
 - Lock hold time reduced in postShip
 
+### Optimization 14: MySQL Configuration Tuning
+- **Implementation**: Optimize MySQL settings for better performance
+- **Rationale**: CPU usage was high (110% peak), loadavg 3-4, system was CPU-bound
+- **Changes**: `webapp/etc/conf.d/my.cnf`
+  - `innodb_buffer_pool_size = 512M` - Buffer pool for data caching (MySQL has 1GB limit)
+  - `innodb_log_file_size = 256M` - Larger redo logs for write performance
+  - `innodb_flush_log_at_trx_commit = 2` - Flush log every second instead of every transaction
+  - `innodb_flush_method = O_DIRECT` - Direct I/O to avoid double buffering
+  - `skip-name-resolve` - Skip DNS lookup for faster connections
+  - `max_connections = 200` - Ensure enough connections
+- **How to discover**: Mackerel Host Metrics showed CPU at 110%, loadavg5 at 3-4
+
+#### Results After Optimization 14
+- **Score: 6250** (raw: 6750, penalty: 500)
+- Score stable in 6200-6650 range
+- MySQL configuration now optimized for workload
+
