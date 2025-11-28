@@ -301,3 +301,23 @@
 - Query efficiency improved by using range scan instead of multiple point lookups
 - Stability improved - penalty reduced from 1000 to 0
 
+### Optimization 20: Use UNION for getNewItems to Enable Index Usage
+- **Implementation**: Replace `status IN (?,?)` with UNION of two separate queries
+- **Rationale**: MySQL query planner chose full table scan (44,000 rows) when using `status IN (?,?)` because merging two sorted index ranges was deemed expensive. By using UNION, each subquery can use the index efficiently and only retrieve LIMIT rows.
+- **Performance measured**:
+  - Original query: 191ms (full table scan + filesort)
+  - UNION query: 2.4ms (index scan, 98 rows max)
+  - **80x faster for first page, 22x faster for pagination**
+- **Changes**: `webapp/go/main.go`
+  - Modified `getNewItems()` to use UNION ALL with separate status queries
+  - Each subquery uses index `idx_status_created_id` with backward scan
+  - Final UNION result only needs to sort 98 rows (49+49) instead of 44,000
+- **How to discover**: EXPLAIN showed `type: ALL` (full table scan) and `Using filesort` for original query. Testing single status showed `ref` type with `Backward index scan`, confirming IN clause caused the issue.
+
+#### Results After Optimization 20
+- **Score: 9160** (+2410, +36%)
+- **Cumulative: 1810 → 9160 (+406%)**
+- **No final check failures**
+- Items listing endpoints significantly faster
+- System can handle higher load with reduced query time
+
