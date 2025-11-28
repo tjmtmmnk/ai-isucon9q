@@ -86,3 +86,18 @@
 - Significant reduction in external API calls during transaction listing
 - One timeout error occurred (-500 penalty) during high load
 
+### Optimization 5: Parallel API Calls in postBuy
+- **Implementation**: Execute APIShipmentCreate and APIPaymentToken in parallel using goroutines
+- **Rationale**: These two external API calls are independent and can run concurrently
+- **Changes**: `webapp/go/main.go`
+  - Used goroutines with channels to execute both API calls simultaneously
+  - Wait for both results before proceeding with transaction
+  - Error handling preserved - rollback on either failure
+- **How to discover**: Mackerel HTTP Server Stats - POST /buy had P95 of 2078ms
+
+#### Results After Optimization 5
+- **Score: ~4750-5050 (average ~4850, +300, +7%)**
+- **Cumulative: 1810 → ~4850 (+168%)**
+- Score variance observed due to timeout penalties
+- POST /buy latency reduced by eliminating sequential API wait times
+

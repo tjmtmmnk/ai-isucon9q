@@ -1595,33 +1595,60 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scr, err := APIShipmentCreate(ctx, getShipmentServiceURL(ctx), &APIShipmentCreateReq{
-		ToAddress:   buyer.Address,
-		ToName:      buyer.AccountName,
-		FromAddress: seller.Address,
-		FromName:    seller.AccountName,
-	})
-	if err != nil {
-		log.Print(err)
+	// Parallel API calls to shipment and payment services
+	type shipmentResult struct {
+		scr *APIShipmentCreateRes
+		err error
+	}
+	type paymentResult struct {
+		pstr *APIPaymentServiceTokenRes
+		err  error
+	}
+
+	shipmentCh := make(chan shipmentResult, 1)
+	paymentCh := make(chan paymentResult, 1)
+
+	go func() {
+		scr, err := APIShipmentCreate(ctx, getShipmentServiceURL(ctx), &APIShipmentCreateReq{
+			ToAddress:   buyer.Address,
+			ToName:      buyer.AccountName,
+			FromAddress: seller.Address,
+			FromName:    seller.AccountName,
+		})
+		shipmentCh <- shipmentResult{scr, err}
+	}()
+
+	go func() {
+		pstr, err := APIPaymentToken(ctx, getPaymentServiceURL(ctx), &APIPaymentServiceTokenReq{
+			ShopID: PaymentServiceIsucariShopID,
+			Token:  rb.Token,
+			APIKey: PaymentServiceIsucariAPIKey,
+			Price:  targetItem.Price,
+		})
+		paymentCh <- paymentResult{pstr, err}
+	}()
+
+	shipmentRes := <-shipmentCh
+	paymentRes := <-paymentCh
+
+	if shipmentRes.err != nil {
+		log.Print(shipmentRes.err)
 		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
 		tx.Rollback()
 
 		return
 	}
 
-	pstr, err := APIPaymentToken(ctx, getPaymentServiceURL(ctx), &APIPaymentServiceTokenReq{
-		ShopID: PaymentServiceIsucariShopID,
-		Token:  rb.Token,
-		APIKey: PaymentServiceIsucariAPIKey,
-		Price:  targetItem.Price,
-	})
-	if err != nil {
-		log.Print(err)
+	if paymentRes.err != nil {
+		log.Print(paymentRes.err)
 
 		outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
 		tx.Rollback()
 		return
 	}
+
+	scr := shipmentRes.scr
+	pstr := paymentRes.pstr
 
 	if pstr.Status == "invalid" {
 		outputErrorMsg(w, http.StatusBadRequest, "カード情報に誤りがあります")
