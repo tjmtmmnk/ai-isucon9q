@@ -1,31 +1,8 @@
 # ISUCON Solver Log
 
-## 2025-11-27
-
-### Session Start
-- Starting ISUCON optimization session
-- Initial state: Docker containers not running
-
 ### Baseline Benchmark
 - **Score: 1810**
 - Multiple timeout errors observed on `/users/transactions.json`, `/new_items.json`, `/login`
-
-### Bottleneck Analysis (Mackerel)
-
-#### HTTP Server Stats (Top 5 slowest endpoints)
-| Endpoint | Avg (ms) | P95 (ms) | Requests |
-|---|---|---|---|
-| GET /users/transactions.json | 3188 | 5668 | 124 |
-| POST /initialize | 4238 | 4238 | 1 |
-| POST /buy | 1593 | 1803 | 25 |
-| GET /new_items.json | 994 | 1594 | 58 |
-| GET /new_items/{root_category_id}.json | 719 | 1217 | 234 |
-
-#### DB Query Stats (Critical N+1 Problems)
-| Query | Executions | Total (ms) | Issue |
-|---|---|---|---|
-| SELECT * FROM categories WHERE id = ? | 105,857 | 116,718 | **N+1 problem** |
-| SELECT * FROM users WHERE id = ? | 49,397 | 55,424 | **N+1 problem** |
 
 ### Optimization 1: Category Caching
 - **Implementation**: Cache all categories in memory at startup and after initialization
@@ -130,27 +107,6 @@
 #### Results After Optimization 7
 - **Score: 4950** (variance due to timeout errors)
 - Note: This optimization eliminates DB queries but the impact is small compared to other bottlenecks (items queries with P95 965-1192ms, external API calls)
-
-## 2025-11-28
-
-### Session Start
-- Previous score: 3550 (with timeout errors and final check failures)
-
-### Bottleneck Analysis (Mackerel)
-
-#### HTTP Server Stats (Top endpoints by P95)
-| Endpoint | P95 (ms) | Requests | Error% |
-|---|---|---|---|
-| POST /initialize | 5290 | 5 | 0% |
-| POST /ship_done | 1185 | 288 | 3.8% |
-| POST /complete | 1164 | 241 | 1.7% |
-| GET /new_items.json | 1164 | 410 | 2.4% |
-| POST /buy | 1106 | 311 | 2.3% |
-| POST /ship | 1103 | 275 | 3.3% |
-
-#### Key Observation
-- High error rates on transaction endpoints (ship_done 3.8%, ship 3.3%)
-- Final check failures: "購入されたはずなのに記録されていません" (items not recorded as purchased)
 
 ### Optimization 8: Move External API Calls Outside DB Transactions
 - **Implementation**: Move `APIShipmentStatus` calls before starting DB transaction in `postShipDone` and `postComplete`
