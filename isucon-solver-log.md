@@ -506,11 +506,53 @@
 - DB queries remain fast (P95 1-3ms)
 - Timeout errors due to external API call latency (not MySQL)
 
-### Current Bottleneck Analysis
-- Main bottleneck: External API calls (payment/shipment services)
-  - POST /buy, /ship, /ship_done, /complete all have P95 ~800-1800ms
-  - This latency is dominated by external service response times
-- DB queries are all fast (P95 1-3ms)
-- Campaign=4 enabled with parallel APIShipmentStatus optimization
-- Infrastructure tuning (MySQL, Nginx) already at good levels
+### Current Bottleneck Analysis (2025-12-01)
+
+#### Investigation Method
+1. **Mackerel HTTP Server Stats** - Endpoint latency, request count, error rate
+2. **Mackerel DB Query Stats** - Slow queries, execution count
+3. **Mackerel Trace Analysis** - Detailed time breakdown per operation
+
+#### HTTP Server Stats (P95 latency order)
+| Endpoint | P95 | Requests | Error Rate | Notes |
+|---|---|---|---|---|
+| POST /ship | 1749ms | 301 | 3.65% | **Slowest** |
+| POST /buy | 1285ms | 911 | 0% | Highest request count |
+| POST /complete | 976ms | 270 | 0.37% | |
+| POST /ship_done | 907ms | 287 | 2.44% | |
+| GET /users/transactions.json | 893ms | 781 | 0% | |
+
+#### DB Query Stats (all fast, P95 < 130ms)
+- DELETE FROM shippings: P95 129ms (rollbackBuy, 18 executions)
+- UPDATE items SET buyer_id=0: P95 100ms (rollbackBuy, 18 executions)
+- UNION items queries: P95 33-59ms (pagination)
+- SELECT * FROM items WHERE id=?: P95 4ms (10,287 executions)
+
+#### Trace Analysis - Time Breakdown
+
+**POST /ship (1702ms total)**
+| Operation | Duration | Percentage |
+|---|---|---|
+| APIShipmentCreate | ~801ms | 47% |
+| APIShipmentRequest | ~802ms | 47% |
+| DB + Commit | ~99ms | 6% |
+
+**POST /buy (802ms total)**
+| Operation | Duration | Percentage |
+|---|---|---|
+| APIPaymentToken | ~800ms | 99.6% |
+| DB operations | ~3ms | 0.4% |
+
+#### Key Finding
+**POST /ship is the biggest bottleneck** because it makes TWO sequential external API calls:
+1. `APIShipmentCreate` (~801ms) - Reserve shipment
+2. `APIShipmentRequest` (~802ms) - Get QR code
+
+These calls are sequential (total ~1600ms for external APIs alone).
+
+#### Potential Optimization
+- Investigate if `APIShipmentCreate` and `APIShipmentRequest` can be parallelized or if QR code can be cached
+- Current external API latency (~800ms per call) is the fundamental performance limit
+- DB queries are fully optimized (P95 1-4ms for common queries)
+- Infrastructure (MySQL, Nginx) already at good levels
 
