@@ -531,6 +531,7 @@
 #### Trace Analysis - Time Breakdown
 
 **POST /ship (1702ms total)**
+
 | Operation | Duration | Percentage |
 |---|---|---|
 | APIShipmentCreate | ~801ms | 47% |
@@ -538,6 +539,7 @@
 | DB + Commit | ~99ms | 6% |
 
 **POST /buy (802ms total)**
+
 | Operation | Duration | Percentage |
 |---|---|---|
 | APIPaymentToken | ~800ms | 99.6% |
@@ -555,4 +557,27 @@ These calls are sequential (total ~1600ms for external APIs alone).
 - Current external API latency (~800ms per call) is the fundamental performance limit
 - DB queries are fully optimized (P95 1-4ms for common queries)
 - Infrastructure (MySQL, Nginx) already at good levels
+
+### Optimization 29: Parallel APIShipmentCreate in postBuy (Fire-and-Forget)
+- **Implementation**: Call APIShipmentCreate in parallel with APIPaymentToken in postBuy, fire-and-forget style
+- **Rationale**: POST /ship had two sequential API calls (APIShipmentCreate + APIShipmentRequest = ~1600ms total). By moving APIShipmentCreate to postBuy and running it in parallel with payment, postShip only needs APIShipmentRequest.
+- **Strategy**:
+  1. In postBuy, after DB commit, start both APIPaymentToken and APIShipmentCreate in parallel
+  2. Wait for payment result (required for transaction validity)
+  3. Don't wait for shipment create - spawn goroutine to update reserve_id asynchronously
+  4. postShip checks if reserve_id exists; if not, falls back to lazy creation
+- **Changes**: `webapp/go/main.go`
+  - Added parallel API call pattern in postBuy after DB commit
+  - APIPaymentToken result is awaited (required)
+  - APIShipmentCreate result is handled in fire-and-forget goroutine
+  - Reserve_id is updated asynchronously, postShip lazy creation serves as fallback
+- **How to discover**: Mackerel HTTP Server Stats showed POST /ship P95 1749ms (slowest endpoint). Mackerel Trace search revealed APIShipmentCreate (~801ms) + APIShipmentRequest (~802ms) = ~1600ms executed sequentially.
+
+#### Results After Optimization 29
+- **Score: 46,560-46,600** (verified across 2 runs)
+- **Improvement: 44,900 → 46,600 (+1,700, +3.8%)**
+- **Cumulative: 1,810 → 46,600 (+2,475%)**
+- postBuy latency unchanged (still ~800ms for payment)
+- postShip latency reduced by ~800ms when reserve_id is pre-populated
+- Fire-and-forget pattern avoids blocking postBuy response on shipment creation
 

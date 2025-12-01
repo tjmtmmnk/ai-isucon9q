@@ -1887,40 +1887,96 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Now call payment API AFTER DB commit
-	// Use a detached context to ensure API call completes even if request times out
-	paymentCtx := context.WithoutCancel(ctx)
-	pstr, err := APIPaymentToken(paymentCtx, getPaymentServiceURL(ctx), &APIPaymentServiceTokenReq{
-		ShopID: PaymentServiceIsucariShopID,
-		Token:  rb.Token,
-		APIKey: PaymentServiceIsucariAPIKey,
-		Price:  targetItem.Price,
-	})
-	if err != nil {
+	// Call payment API and shipment create API in parallel AFTER DB commit
+	// This reduces postBuy latency and pre-populates reserve_id for postShip
+	// Use detached context to ensure API calls complete even if request times out
+	apiCtx := context.WithoutCancel(ctx)
+
+	// Channel for payment result
+	type paymentResult struct {
+		pstr *APIPaymentServiceTokenRes
+		err  error
+	}
+	paymentCh := make(chan paymentResult, 1)
+
+	// Channel for shipment create result
+	type shipmentResult struct {
+		scr *APIShipmentCreateRes
+		err error
+	}
+	shipmentCh := make(chan shipmentResult, 1)
+
+	// Start payment API call
+	go func() {
+		pstr, err := APIPaymentToken(apiCtx, getPaymentServiceURL(ctx), &APIPaymentServiceTokenReq{
+			ShopID: PaymentServiceIsucariShopID,
+			Token:  rb.Token,
+			APIKey: PaymentServiceIsucariAPIKey,
+			Price:  targetItem.Price,
+		})
+		paymentCh <- paymentResult{pstr: pstr, err: err}
+	}()
+
+	// Start shipment create API call (pre-populate reserve_id)
+	go func() {
+		scr, err := APIShipmentCreate(apiCtx, getShipmentServiceURL(ctx), &APIShipmentCreateReq{
+			ToAddress:   buyer.Address,
+			ToName:      buyer.AccountName,
+			FromAddress: seller.Address,
+			FromName:    seller.AccountName,
+		})
+		shipmentCh <- shipmentResult{scr: scr, err: err}
+	}()
+
+	// Wait for payment result (required)
+	payRes := <-paymentCh
+	if payRes.err != nil {
 		// Payment failed - need to rollback the DB changes
-		log.Printf("payment failed, rolling back: %v", err)
+		log.Printf("payment failed, rolling back: %v", payRes.err)
 		rollbackBuy(dbCtx, targetItem.ID, transactionEvidenceID)
 		outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
+		// Still wait for shipment result to avoid goroutine leak
+		<-shipmentCh
 		return
 	}
 
+	pstr := payRes.pstr
 	if pstr.Status == "invalid" {
 		rollbackBuy(dbCtx, targetItem.ID, transactionEvidenceID)
 		outputErrorMsg(w, http.StatusBadRequest, "カード情報に誤りがあります")
+		<-shipmentCh
 		return
 	}
 
 	if pstr.Status == "fail" {
 		rollbackBuy(dbCtx, targetItem.ID, transactionEvidenceID)
 		outputErrorMsg(w, http.StatusBadRequest, "カードの残高が足りません")
+		<-shipmentCh
 		return
 	}
 
 	if pstr.Status != "ok" {
 		rollbackBuy(dbCtx, targetItem.ID, transactionEvidenceID)
 		outputErrorMsg(w, http.StatusBadRequest, "想定外のエラー")
+		<-shipmentCh
 		return
 	}
+
+	// Fire-and-forget: Don't wait for shipment result, update DB asynchronously
+	// postShip will handle it lazily if this fails
+	go func() {
+		shipRes := <-shipmentCh
+		if shipRes.err == nil && shipRes.scr != nil {
+			_, err := dbx.ExecContext(dbCtx, "UPDATE `shippings` SET `reserve_id` = ?, `reserve_time` = ? WHERE `transaction_evidence_id` = ?",
+				shipRes.scr.ReserveID,
+				shipRes.scr.ReserveTime,
+				transactionEvidenceID,
+			)
+			if err != nil {
+				log.Printf("failed to update reserve_id: %v", err)
+			}
+		}
+	}()
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(resBuy{TransactionEvidenceID: transactionEvidenceID})
