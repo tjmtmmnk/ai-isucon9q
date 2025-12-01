@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
@@ -20,6 +22,29 @@ const (
 
 	userAgent = "isucon9-qualify-webapp"
 )
+
+// apiHTTPClient is a custom HTTP client optimized for external API calls.
+// Why not use http.DefaultClient: DefaultClient has no timeout and limited
+// connection pooling. This custom client reduces connection overhead and
+// improves latency for repeated API calls.
+var apiHTTPClient = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		// Connection pool settings for high concurrency
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 50,
+		MaxConnsPerHost:     100,
+		// Timeouts for connection establishment
+		DialContext: (&net.Dialer{
+			Timeout:   3 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		// Keep-alive settings
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   3 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
 
 type APIPaymentServiceTokenReq struct {
 	ShopID string `json:"shop_id"`
@@ -81,7 +106,7 @@ func APIPaymentToken(ctx context.Context, paymentURL string, param *APIPaymentSe
 	req.Header.Set("Content-Type", "application/json")
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
-	res, err := http.DefaultClient.Do(req)
+	res, err := apiHTTPClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -140,7 +165,7 @@ func APIShipmentCreate(ctx context.Context, shipmentURL string, param *APIShipme
 	req.Header.Set("Authorization", IsucariAPIToken)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
-	res, err := http.DefaultClient.Do(req)
+	res, err := apiHTTPClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -199,7 +224,7 @@ func APIShipmentRequest(ctx context.Context, shipmentURL string, param *APIShipm
 	req.Header.Set("Authorization", IsucariAPIToken)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
-	res, err := http.DefaultClient.Do(req)
+	res, err := apiHTTPClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -250,7 +275,7 @@ func APIShipmentStatus(ctx context.Context, shipmentURL string, param *APIShipme
 	req.Header.Set("Authorization", IsucariAPIToken)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
-	res, err := http.DefaultClient.Do(req)
+	res, err := apiHTTPClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

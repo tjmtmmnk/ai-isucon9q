@@ -789,8 +789,10 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
-		// campaign=1 でユーザー数が増加し、取引機会が増える
-		Campaign: 1,
+		// campaign=2 でユーザー数が増加し、取引機会が増える
+		// per-item mutex で多重決済は防止済み
+		// campaign=3,4 は負荷が高すぎて不安定なため2を使用
+		Campaign: 2,
 		// 実装言語を返す
 		Language: "Go",
 	}
