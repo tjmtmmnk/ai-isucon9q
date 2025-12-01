@@ -423,11 +423,12 @@
 - **How to discover**: Analysis of external API call patterns and testing different campaign levels
 
 #### Results After Optimization 25
-- **Score: ~35,000-37,000** (average ~35,200)
-- **Improvement: ~32,000 → ~35,200 (+3,200, +10%)**
-- **Cumulative: 1,810 → ~35,200 (+1,844%)**
+- **Score: 36,620** (raw: 39,620, penalty: 3,000)
+- **Improvement: 31,500 → 36,620 (+5,120, +16%)**
+- **Cumulative: 1,810 → 36,620 (+1,923%)**
 - Connection reuse reduces TCP handshake overhead
-- Campaign=2 increases transaction volume while maintaining stability
+- Campaign=2 increases transaction volume
+- 6 final check errors due to timeouts under higher load
 
 ### Current Bottleneck Analysis
 - Main bottleneck: External API calls (payment/shipment services)
