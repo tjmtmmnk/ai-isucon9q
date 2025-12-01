@@ -818,11 +818,12 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
-		// campaign=3 でユーザー数/取引機会が更に増加
+		// campaign=4 でユーザー数/取引機会が更に増加
 		// per-item mutex で多重決済は防止済み
 		// postBuyからAPIShipmentCreateを遅延実行(postShip)にすることで
 		// postBuyのレイテンシを削減し、タイムアウトによる不整合を防止
-		Campaign: 3,
+		// getTransactionsのAPIShipmentStatus呼び出しを並列化してタイムアウトを防止
+		Campaign: 4,
 		// 実装言語を返す
 		Language: "Go",
 	}
@@ -1322,6 +1323,64 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Collect shippings that need API status check (non-terminal status)
+	// and make parallel API calls to reduce total latency
+	type shipmentStatusRequest struct {
+		teID      int64
+		reserveID string
+	}
+	var statusRequests []shipmentStatusRequest
+	for _, item := range items {
+		te, hasTe := teMap[item.ID]
+		if hasTe && te.ID > 0 {
+			sh, hasShipping := shippingMap[te.ID]
+			if hasShipping && sh.Status != ShippingsStatusDone && sh.ReserveID != "" {
+				statusRequests = append(statusRequests, shipmentStatusRequest{
+					teID:      te.ID,
+					reserveID: sh.ReserveID,
+				})
+			}
+		}
+	}
+
+	// Make parallel API calls for shipment status
+	// Why not sequential: At campaign=4, sequential calls for N items take N*latency (~800ms each),
+	// which causes timeouts. Parallel calls reduce total time to max(latencies).
+	shipmentStatusMap := make(map[int64]string) // teID -> status
+	if len(statusRequests) > 0 {
+		type statusResult struct {
+			teID   int64
+			status string
+			err    error
+		}
+		resultCh := make(chan statusResult, len(statusRequests))
+		shipmentURL := getShipmentServiceURL(ctx)
+
+		for _, req := range statusRequests {
+			go func(teID int64, reserveID string) {
+				ssr, err := APIShipmentStatus(ctx, shipmentURL, &APIShipmentStatusReq{
+					ReserveID: reserveID,
+				})
+				if err != nil {
+					resultCh <- statusResult{teID: teID, status: "", err: err}
+				} else {
+					resultCh <- statusResult{teID: teID, status: ssr.Status, err: nil}
+				}
+			}(req.teID, req.reserveID)
+		}
+
+		// Collect results
+		for i := 0; i < len(statusRequests); i++ {
+			result := <-resultCh
+			if result.err != nil {
+				// Fallback to DB value on API error (e.g., timeout)
+				log.Print(result.err)
+			} else {
+				shipmentStatusMap[result.teID] = result.status
+			}
+		}
+	}
+
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
 		seller, err := getUserSimpleByID(ctx, tx, item.SellerID)
@@ -1376,19 +1435,10 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			// Use DB status for terminal state (done) to avoid unnecessary API call
+			// Use pre-fetched API status if available, otherwise use DB status
 			shippingStatus := shipping.Status
-			if shipping.Status != ShippingsStatusDone {
-				ssr, err := APIShipmentStatus(ctx, getShipmentServiceURL(ctx), &APIShipmentStatusReq{
-					ReserveID: shipping.ReserveID,
-				})
-				if err != nil {
-					// Fallback to DB value on API error (e.g., timeout)
-					// DB value is usually up-to-date as it's updated by postShip, postShipDone, postComplete
-					log.Print(err)
-				} else {
-					shippingStatus = ssr.Status
-				}
+			if apiStatus, ok := shipmentStatusMap[transactionEvidence.ID]; ok {
+				shippingStatus = apiStatus
 			}
 
 			itemDetail.TransactionEvidenceID = transactionEvidence.ID

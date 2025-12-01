@@ -459,11 +459,35 @@
 - **Final check errors eliminated** - DB-first strategy ensures consistency
 - Score variance due to system load, but all runs pass benchmark
 
+### Optimization 27: Parallel APIShipmentStatus in getTransactions for Campaign=4
+- **Implementation**: Parallelize `APIShipmentStatus` API calls in `getTransactions` using goroutines
+- **Root Cause Analysis**: At campaign=4, `getTransactions` was calling `APIShipmentStatus` sequentially in a loop for each item with non-terminal shipping status. With N items needing status check:
+  - Sequential: Total time = N * ~800ms = ~8000ms for 10 items (timeout)
+  - Parallel: Total time = max(latencies) = ~800ms regardless of N
+- **Solution**:
+  1. Collect all shippings that need API status check (status != "done" and has reserve_id)
+  2. Launch goroutines for all API calls simultaneously
+  3. Collect results via buffered channel
+  4. Use pre-fetched status in main loop; fallback to DB value on API error
+- **Changes**: `webapp/go/main.go`
+  - Added parallel API call logic before the main item processing loop
+  - Each goroutine calls `APIShipmentStatus` independently
+  - Results stored in `shipmentStatusMap[teID]` for O(1) lookup
+  - Changed Campaign from 3 to 4
+- **Why not use errgroup**: Simple channel-based approach sufficient here; errgroup adds overhead for non-error-propagating pattern (we fallback to DB on error)
+- **How to discover**: Previous optimization attempt 18 failed due to resource contention, but the root cause was different architecture. Current DB-first strategy in postBuy makes parallel calls safe.
+
+#### Results After Optimization 27
+- **Score: 42,760-44,880** (verified across 4 consecutive runs)
+- **Improvement: ~40,000 → ~43,500 (+9%)**
+- **Cumulative: 1,810 → ~43,500 (+2,303%)**
+- **Campaign=4 now stable** - all 4 runs passed benchmark
+- Parallel API calls reduced getTransactions latency from O(N*800ms) to O(800ms)
+
 ### Current Bottleneck Analysis
 - Main bottleneck: External API calls (payment/shipment services)
   - POST /buy, /ship, /ship_done, /complete all have P95 ~800-1800ms
   - This latency is dominated by external service response times
 - DB queries are all fast (P95 1-3ms)
-- Campaign=3 now stable with DB-first strategy
-- Campaign=4 may be possible with further optimization
+- Campaign=4 enabled with parallel APIShipmentStatus optimization
 
