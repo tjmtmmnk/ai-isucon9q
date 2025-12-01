@@ -581,3 +581,93 @@ These calls are sequential (total ~1600ms for external APIs alone).
 - postShip latency reduced by ~800ms when reserve_id is pre-populated
 - Fire-and-forget pattern avoids blocking postBuy response on shipment creation
 
+### pprof Analysis (2025-12-01)
+
+#### Methodology
+- Added pprof handlers to Go application for CPU, heap, and allocation profiling
+- Collected 75-second CPU profile during benchmark run
+- Collected heap and allocation profiles after benchmark
+
+#### CPU Profile Results
+
+**Critical Finding: bcrypt.CompareHashAndPassword consumes 83.65% of CPU**
+
+| Function | Cumulative % | Notes |
+|---|---|---|
+| golang.org/x/crypto/blowfish.encryptBlock | 80.36% | bcrypt internal |
+| golang.org/x/crypto/blowfish.ExpandKey | 83.58% | bcrypt internal |
+| main.postLogin | 83.70% | Calls bcrypt |
+
+**Top CPU Functions (flat time)**
+
+| Function | Flat % | Cumulative % |
+|---|---|---|
+| blowfish.encryptBlock | 76.92% | 80.36% |
+| syscall.Syscall6 | 4.91% | 4.91% |
+| runtime.asyncPreempt | 3.69% | 3.69% |
+| blowfish.ExpandKey | 3.10% | 83.58% |
+
+**Other Endpoints CPU Usage (much smaller)**
+- main.getNewCategoryItems: 2.24% cumulative
+- main.getItem: 3.51% cumulative
+- main.getTransactions: 1.76% cumulative
+
+#### Memory Allocation Results
+
+**Top Allocators (Total 12.4GB allocated during benchmark)**
+
+| Function | Allocation | % of Total | Notes |
+|---|---|---|---|
+| grpc BufferPool | 1582MB | 12.77% | gRPC/OpenTelemetry |
+| database/sql.convertAssignRows | 1105MB | 8.93% | DB result scanning |
+| reflect.growslice | 987MB | 7.97% | Slice growing |
+| main.getNewCategoryItems | 618MB | 4.99% | Items listing |
+| main.getTransactions | 119MB | 0.96% | Transaction listing |
+
+#### Key Observations
+
+1. **bcrypt is the dominant CPU bottleneck**
+   - Every login request triggers bcrypt hash comparison (BcryptCost=10)
+   - ~84% of total CPU time spent on password hashing
+   - This is by design (security vs performance tradeoff)
+
+2. **OpenTelemetry tracing has high memory overhead**
+   - 75.55% cumulative memory through otelchi.traceware.ServeHTTP
+   - gRPC buffer pool uses 1.5GB
+   - Trace recording allocates significant memory
+
+3. **Database operations are efficient**
+   - DB queries (sqlx, mysql driver) show minimal CPU usage
+   - Indexes and query optimizations are effective
+
+4. **External API calls dominate wall-clock time but not CPU**
+   - pprof shows CPU % but external API calls are I/O bound
+   - This is why they don't show up prominently in CPU profile
+
+#### Optimization Opportunities
+
+1. **bcrypt Optimization (High Impact, Risky)**
+   - Option A: Reduce bcrypt cost (current: 10, could reduce to 4-6)
+   - Option B: Cache session after successful login to reduce login frequency
+   - Option C: Pre-compute bcrypt hashes are not cacheable (each compare needs work)
+   - **Risk**: May violate benchmarker's security expectations
+
+2. **OpenTelemetry Optimization (Medium Impact)**
+   - Reduce trace sampling rate
+   - Disable tracing for non-essential endpoints
+   - Consider removing tracing entirely for maximum performance
+   - **Risk**: Loses observability benefits
+
+3. **Memory Allocation Reduction (Low Impact)**
+   - Use sync.Pool for frequently allocated structs
+   - Pre-allocate slices with known capacity
+   - **Note**: GC overhead is not currently a bottleneck
+
+#### Conclusion
+
+The pprof analysis reveals that **bcrypt password hashing** is the largest CPU consumer by far (84%). However, this is a deliberate security feature and reducing bcrypt cost may not be permitted by the benchmark rules.
+
+The second largest overhead is **OpenTelemetry tracing** which adds both CPU and memory overhead. If tracing is not required for scoring, disabling it could provide performance gains.
+
+DB and application logic are highly optimized - no significant CPU bottlenecks remain in the core business logic.
+
