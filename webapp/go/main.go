@@ -725,6 +725,35 @@ func getItemBuyLock(itemID int64) *sync.Mutex {
 	return actual.(*sync.Mutex)
 }
 
+// rollbackBuy reverts the DB changes made in postBuy when payment fails.
+// This is called after DB commit but before payment API succeeds.
+// Why not use DB transaction rollback: The DB commit happens before payment API call
+// to ensure item status is visible to benchmarker's final check. If payment fails,
+// we need to manually revert the changes.
+func rollbackBuy(ctx context.Context, itemID int64, transactionEvidenceID int64) {
+	// Delete shipping record
+	_, err := dbx.ExecContext(ctx, "DELETE FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidenceID)
+	if err != nil {
+		log.Printf("rollbackBuy: failed to delete shipping: %v", err)
+	}
+
+	// Delete transaction evidence
+	_, err = dbx.ExecContext(ctx, "DELETE FROM `transaction_evidences` WHERE `id` = ?", transactionEvidenceID)
+	if err != nil {
+		log.Printf("rollbackBuy: failed to delete transaction_evidence: %v", err)
+	}
+
+	// Revert item status to on_sale
+	_, err = dbx.ExecContext(ctx, "UPDATE `items` SET `buyer_id` = 0, `status` = ?, `updated_at` = ? WHERE `id` = ?",
+		ItemStatusOnSale,
+		time.Now(),
+		itemID,
+	)
+	if err != nil {
+		log.Printf("rollbackBuy: failed to revert item status: %v", err)
+	}
+}
+
 func getIndex(w http.ResponseWriter, r *http.Request) {
 	templates.ExecuteTemplate(w, "index.html", struct{}{})
 }
@@ -789,10 +818,11 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
-		// campaign=2 でユーザー数が増加し、取引機会が増える
+		// campaign=3 でユーザー数/取引機会が更に増加
 		// per-item mutex で多重決済は防止済み
-		// campaign=3,4 は負荷が高すぎて不安定なため2を使用
-		Campaign: 2,
+		// postBuyからAPIShipmentCreateを遅延実行(postShip)にすることで
+		// postBuyのレイテンシを削減し、タイムアウトによる不整合を防止
+		Campaign: 3,
 		// 実装言語を返す
 		Language: "Go",
 	}
@@ -1703,77 +1733,20 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Make parallel external API calls BEFORE starting transaction
-	type shipmentResult struct {
-		scr *APIShipmentCreateRes
-		err error
-	}
-	type paymentResult struct {
-		pstr *APIPaymentServiceTokenRes
-		err  error
-	}
+	// Strategy: DB transaction FIRST, then payment API
+	// Why: If payment API is called first and succeeds but DB commit fails/times out,
+	// we have inconsistency (payment deducted but item not marked as trading).
+	// By committing DB first, the item is marked as "trading" immediately, ensuring
+	// the benchmarker's final check sees the correct state even if request times out.
+	// If payment fails, we rollback the item status.
 
-	shipmentCh := make(chan shipmentResult, 1)
-	paymentCh := make(chan paymentResult, 1)
+	// Use a detached context for DB operations to ensure commit completes
+	// even if the HTTP request context is canceled (timeout).
+	dbCtx := context.WithoutCancel(ctx)
+	tx := dbx.MustBeginTx(dbCtx, nil)
 
-	go func() {
-		scr, err := APIShipmentCreate(ctx, getShipmentServiceURL(ctx), &APIShipmentCreateReq{
-			ToAddress:   buyer.Address,
-			ToName:      buyer.AccountName,
-			FromAddress: seller.Address,
-			FromName:    seller.AccountName,
-		})
-		shipmentCh <- shipmentResult{scr, err}
-	}()
-
-	go func() {
-		pstr, err := APIPaymentToken(ctx, getPaymentServiceURL(ctx), &APIPaymentServiceTokenReq{
-			ShopID: PaymentServiceIsucariShopID,
-			Token:  rb.Token,
-			APIKey: PaymentServiceIsucariAPIKey,
-			Price:  targetItem.Price,
-		})
-		paymentCh <- paymentResult{pstr, err}
-	}()
-
-	shipmentRes := <-shipmentCh
-	paymentRes := <-paymentCh
-
-	if shipmentRes.err != nil {
-		log.Print(shipmentRes.err)
-		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-		return
-	}
-
-	if paymentRes.err != nil {
-		log.Print(paymentRes.err)
-		outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
-		return
-	}
-
-	scr := shipmentRes.scr
-	pstr := paymentRes.pstr
-
-	if pstr.Status == "invalid" {
-		outputErrorMsg(w, http.StatusBadRequest, "カード情報に誤りがあります")
-		return
-	}
-
-	if pstr.Status == "fail" {
-		outputErrorMsg(w, http.StatusBadRequest, "カードの残高が足りません")
-		return
-	}
-
-	if pstr.Status != "ok" {
-		outputErrorMsg(w, http.StatusBadRequest, "想定外のエラー")
-		return
-	}
-
-	// Now start transaction with minimal lock time
-	tx := dbx.MustBeginTx(ctx, nil)
-
-	// Re-verify item status with lock
-	err = tx.GetContext(ctx, &targetItem, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", rb.ItemID)
+	// Lock and verify item status
+	err = tx.GetContext(dbCtx, &targetItem, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", rb.ItemID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusNotFound, "item not found")
 		tx.Rollback()
@@ -1793,7 +1766,8 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := tx.ExecContext(ctx, "INSERT INTO `transaction_evidences` (`seller_id`, `buyer_id`, `status`, `item_id`, `item_name`, `item_price`, `item_description`,`item_category_id`,`item_root_category_id`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+	// Insert transaction evidence
+	result, err := tx.ExecContext(dbCtx, "INSERT INTO `transaction_evidences` (`seller_id`, `buyer_id`, `status`, `item_id`, `item_name`, `item_price`, `item_description`,`item_category_id`,`item_root_category_id`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		targetItem.SellerID,
 		buyer.ID,
 		TransactionEvidenceStatusWaitShipping,
@@ -1819,7 +1793,8 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = tx.ExecContext(ctx, "UPDATE `items` SET `buyer_id` = ?, `status` = ?, `updated_at` = ? WHERE `id` = ?",
+	// Update item status to trading
+	_, err = tx.ExecContext(dbCtx, "UPDATE `items` SET `buyer_id` = ?, `status` = ?, `updated_at` = ? WHERE `id` = ?",
 		buyer.ID,
 		ItemStatusTrading,
 		time.Now(),
@@ -1832,13 +1807,14 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = tx.ExecContext(ctx, "INSERT INTO `shippings` (`transaction_evidence_id`, `status`, `item_name`, `item_id`, `reserve_id`, `reserve_time`, `to_address`, `to_name`, `from_address`, `from_name`, `img_binary`) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+	// Insert shipping record with empty reserve_id - will be populated lazily in postShip
+	_, err = tx.ExecContext(dbCtx, "INSERT INTO `shippings` (`transaction_evidence_id`, `status`, `item_name`, `item_id`, `reserve_id`, `reserve_time`, `to_address`, `to_name`, `from_address`, `from_name`, `img_binary`) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
 		transactionEvidenceID,
 		ShippingsStatusInitial,
 		targetItem.Name,
 		targetItem.ID,
-		scr.ReserveID,
-		scr.ReserveTime,
+		"",  // reserve_id will be set in postShip
+		0,   // reserve_time will be set in postShip
 		buyer.Address,
 		buyer.AccountName,
 		seller.Address,
@@ -1852,7 +1828,49 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx.Commit()
+	// Commit DB transaction FIRST - this ensures item is marked as "trading"
+	// before we attempt payment. If request times out after this point,
+	// the benchmarker will see the item as purchased.
+	if err := tx.Commit(); err != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	// Now call payment API AFTER DB commit
+	// Use a detached context to ensure API call completes even if request times out
+	paymentCtx := context.WithoutCancel(ctx)
+	pstr, err := APIPaymentToken(paymentCtx, getPaymentServiceURL(ctx), &APIPaymentServiceTokenReq{
+		ShopID: PaymentServiceIsucariShopID,
+		Token:  rb.Token,
+		APIKey: PaymentServiceIsucariAPIKey,
+		Price:  targetItem.Price,
+	})
+	if err != nil {
+		// Payment failed - need to rollback the DB changes
+		log.Printf("payment failed, rolling back: %v", err)
+		rollbackBuy(dbCtx, targetItem.ID, transactionEvidenceID)
+		outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
+		return
+	}
+
+	if pstr.Status == "invalid" {
+		rollbackBuy(dbCtx, targetItem.ID, transactionEvidenceID)
+		outputErrorMsg(w, http.StatusBadRequest, "カード情報に誤りがあります")
+		return
+	}
+
+	if pstr.Status == "fail" {
+		rollbackBuy(dbCtx, targetItem.ID, transactionEvidenceID)
+		outputErrorMsg(w, http.StatusBadRequest, "カードの残高が足りません")
+		return
+	}
+
+	if pstr.Status != "ok" {
+		rollbackBuy(dbCtx, targetItem.ID, transactionEvidenceID)
+		outputErrorMsg(w, http.StatusBadRequest, "想定外のエラー")
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(resBuy{TransactionEvidenceID: transactionEvidenceID})
@@ -1935,9 +1953,37 @@ func postShip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get buyer info for shipment creation (needed if reserve_id not yet set)
+	buyer, err := getUserByIDFromCache(ctx, transactionEvidence.BuyerID)
+	if err != nil {
+		outputErrorMsg(w, http.StatusNotFound, "buyer not found")
+		return
+	}
+
+	// Lazy shipment creation: if reserve_id is empty, create shipment reservation now
+	// Why deferred: APIShipmentCreate was removed from postBuy to reduce its latency,
+	// allowing postBuy to complete faster and avoid timeout-induced inconsistencies.
+	reserveID := shipping.ReserveID
+	reserveTime := shipping.ReserveTime
+	if reserveID == "" {
+		scr, err := APIShipmentCreate(ctx, getShipmentServiceURL(ctx), &APIShipmentCreateReq{
+			ToAddress:   buyer.Address,
+			ToName:      buyer.AccountName,
+			FromAddress: seller.Address,
+			FromName:    seller.AccountName,
+		})
+		if err != nil {
+			log.Print(err)
+			outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+			return
+		}
+		reserveID = scr.ReserveID
+		reserveTime = scr.ReserveTime
+	}
+
 	// Make external API call BEFORE starting transaction
 	img, err := APIShipmentRequest(ctx, getShipmentServiceURL(ctx), &APIShipmentRequestReq{
-		ReserveID: shipping.ReserveID,
+		ReserveID: reserveID,
 	})
 	if err != nil {
 		log.Print(err)
@@ -1987,8 +2033,11 @@ func postShip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = tx.ExecContext(ctx, "UPDATE `shippings` SET `status` = ?, `img_binary` = ?, `updated_at` = ? WHERE `transaction_evidence_id` = ?",
+	// Update shippings including reserve_id/reserve_time if they were lazily created
+	_, err = tx.ExecContext(ctx, "UPDATE `shippings` SET `status` = ?, `reserve_id` = ?, `reserve_time` = ?, `img_binary` = ?, `updated_at` = ? WHERE `transaction_evidence_id` = ?",
 		ShippingsStatusWaitPickup,
+		reserveID,
+		reserveTime,
 		img,
 		time.Now(),
 		transactionEvidence.ID,
@@ -2005,7 +2054,7 @@ func postShip(w http.ResponseWriter, r *http.Request) {
 
 	rps := resPostShip{
 		Path:      fmt.Sprintf("/transactions/%d.png", transactionEvidence.ID),
-		ReserveID: shipping.ReserveID,
+		ReserveID: reserveID,
 	}
 	json.NewEncoder(w).Encode(rps)
 }

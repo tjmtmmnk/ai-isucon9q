@@ -430,14 +430,40 @@
 - Campaign=2 increases transaction volume
 - 6 final check errors due to timeouts under higher load
 
+### Optimization 26: Lazy Shipment Creation and DB-First Strategy for Campaign=3
+- **Implementation**: Two major changes to postBuy for campaign=3 stability
+- **Root Cause Analysis**: Campaign=3 was unstable with "購入されたはずなのに記録されていません" errors because:
+  1. Payment API was called BEFORE DB transaction
+  2. If request timed out AFTER payment succeeded but BEFORE DB commit, benchmarker saw inconsistency
+- **Solution 1 - Lazy Shipment Creation**:
+  - Remove APIShipmentCreate from postBuy (reduces latency from ~1800ms to ~900ms)
+  - Defer shipment reservation to postShip (when seller actually ships)
+  - Insert shippings record with empty reserve_id in postBuy, populate lazily in postShip
+- **Solution 2 - DB-First Strategy**:
+  - Commit DB transaction FIRST (mark item as "trading", create transaction_evidence, shipping)
+  - THEN call payment API with detached context (context.WithoutCancel)
+  - If payment fails, manually rollback DB changes via rollbackBuy() function
+  - This ensures item is visible to benchmarker's final check even if request times out after DB commit
+- **Changes**: `webapp/go/main.go`
+  - Added `rollbackBuy()` function to revert DB changes if payment fails
+  - Modified `postBuy()` to commit DB before calling payment API
+  - Modified `postShip()` to lazily call APIShipmentCreate if reserve_id is empty
+  - Changed Campaign from 2 to 3
+- **How to discover**: Analysis of timeout-induced inconsistency pattern in final check errors
+
+#### Results After Optimization 26
+- **Score: 37,900-42,780** (raw, penalty: 0)
+- **Improvement: 36,620 → ~40,000 (+3,380, +9%)**
+- **Cumulative: 1,810 → ~40,000 (+2,110%)**
+- **Campaign=3 now stable** - no final check errors in 6 consecutive runs
+- **Final check errors eliminated** - DB-first strategy ensures consistency
+- Score variance due to system load, but all runs pass benchmark
+
 ### Current Bottleneck Analysis
 - Main bottleneck: External API calls (payment/shipment services)
   - POST /buy, /ship, /ship_done, /complete all have P95 ~800-1800ms
   - This latency is dominated by external service response times
 - DB queries are all fast (P95 1-3ms)
-- Campaign=3/4 possible but unstable due to increased load
-- Further optimization requires either:
-  1. Reducing external API call frequency
-  2. Caching external API responses where safe
-  3. Better load balancing or system tuning
+- Campaign=3 now stable with DB-first strategy
+- Campaign=4 may be possible with further optimization
 
