@@ -361,3 +361,29 @@
 - Penalty reduced from 1000 to 500
 - API timeout no longer causes getTransactions to fail completely
 
+### Optimization 23: Account Name Cache for Login
+- **Implementation**: Add account_name -> User cache for faster login lookups
+- **Rationale**: Login queries (`SELECT * FROM users WHERE account_name = ?`) were executed 99 times with P95 66ms
+- **Changes**: `webapp/go/main.go`
+  - Added `userCacheByAccountName map[string]User` for account_name lookups
+  - Added `getUserByAccountNameFromCache()` function with cache-first lookup
+  - Updated `loadUsers()` to populate both ID and account_name caches
+  - Updated `setUserCache()` to maintain both caches
+  - Modified `postLogin()` to use cache instead of DB query
+- **How to discover**: Mackerel DB Query Stats showed `SELECT * FROM users WHERE account_name = ?` with 99 executions and P95 66ms
+
+#### Results After Optimization 23
+- **Score: 15160** (raw: 15160, penalty: 0)
+- **Impact**: Neutral (login frequency is low during benchmark)
+- DB queries for login eliminated but main bottleneck remains external API calls (P95 820-824ms)
+
+### Current Bottleneck Analysis
+- Main bottleneck: External API calls (payment/shipment services)
+  - POST /buy, /ship, /ship_done, /complete all have P95 ~820ms
+  - This latency is dominated by external service response times
+- DB queries are all fast (P95 1-3ms)
+- Further optimization requires either:
+  1. Reducing external API call frequency
+  2. Caching external API responses where safe
+  3. Parallel processing improvements
+
