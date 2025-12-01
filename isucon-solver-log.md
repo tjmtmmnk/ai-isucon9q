@@ -404,13 +404,39 @@
 - Timeout errors cause final check failures but score significantly improved
 - Campaign enabled successfully - more users and transactions
 
+### Optimization 25: HTTP Client Optimization and Campaign=2
+- **Implementation**: Custom HTTP client with connection pooling and increase campaign to 2
+- **Rationale**:
+  - Default http.Client has no timeout and limited connection pooling
+  - Campaign=2 increases users/transactions further with per-item mutex preventing multi-payment
+- **Changes**:
+  - `webapp/go/api.go`: Added `apiHTTPClient` with optimized settings
+    - MaxIdleConns: 100, MaxIdleConnsPerHost: 50, MaxConnsPerHost: 100
+    - Keep-alive: 30s, Dial timeout: 3s, Total timeout: 5s
+    - Replaced all `http.DefaultClient.Do()` with `apiHTTPClient.Do()`
+  - `webapp/go/main.go`: Changed Campaign from 1 to 2
+- **Testing Results**:
+  - Campaign=1: ~31,500
+  - Campaign=2: ~35,000-37,000 (selected - stable)
+  - Campaign=3: 40,000-45,000 (unstable - sometimes fails)
+  - Campaign=4: Failed (too many errors)
+- **How to discover**: Analysis of external API call patterns and testing different campaign levels
+
+#### Results After Optimization 25
+- **Score: ~35,000-37,000** (average ~35,200)
+- **Improvement: ~32,000 → ~35,200 (+3,200, +10%)**
+- **Cumulative: 1,810 → ~35,200 (+1,844%)**
+- Connection reuse reduces TCP handshake overhead
+- Campaign=2 increases transaction volume while maintaining stability
+
 ### Current Bottleneck Analysis
 - Main bottleneck: External API calls (payment/shipment services)
-  - POST /buy, /ship, /ship_done, /complete all have P95 ~820ms
+  - POST /buy, /ship, /ship_done, /complete all have P95 ~800-1800ms
   - This latency is dominated by external service response times
 - DB queries are all fast (P95 1-3ms)
+- Campaign=3/4 possible but unstable due to increased load
 - Further optimization requires either:
   1. Reducing external API call frequency
   2. Caching external API responses where safe
-  3. Parallel processing improvements
+  3. Better load balancing or system tuning
 
