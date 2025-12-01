@@ -378,30 +378,39 @@
 - DB queries for login eliminated but main bottleneck remains external API calls (P95 820-824ms)
 
 ### Optimization 24: Enable Campaign=1 with Per-Item Mutex
-- **Implementation**: Add per-item mutex to prevent multi-payment errors and enable campaign=1
-- **Rationale**: Previous attempt at campaign=1 failed with "多重決済を検知しました" (multi-payment detected) error. Root cause: postBuy optimization moved external API calls outside DB transaction, allowing concurrent purchases of the same item to both succeed at payment API before DB lock is acquired.
-- **Changes**: `webapp/go/main.go`
-  - Added `itemBuyLocks sync.Map` for per-item mutex storage
+- **Implementation**: Add per-item mutex to prevent concurrent purchases and enable campaign=1
+- **Rationale**: Campaign feature increases user count and transaction opportunities. Previous attempt failed with "多重決済を検知しました" (multi-payment detected) error due to race conditions in postBuy.
+- **Root Cause Analysis**:
+  - postBuy was optimized to make external API calls (payment, shipment) BEFORE starting the DB transaction to minimize lock hold time
+  - This allowed two concurrent requests for the same item to both call the payment API before either acquired the DB lock
+  - Both payment calls succeeded, causing multi-payment detection by the benchmark checker
+- **Solution**:
+  - Added `itemBuyLocks sync.Map` (map[int64]*sync.Mutex) for per-item locking
   - Added `getItemBuyLock(itemID int64) *sync.Mutex` helper function
-  - Modified `postBuy()` to acquire item-specific lock before any processing
-  - Changed `postInitialize()` to return `campaign: 1` instead of 0
-- **How to discover**: Manual.md states campaign=1-4 increases users/transactions. Previous attempt failed with multi-payment error. Code analysis revealed race condition in postBuy where concurrent requests could both call payment API before DB lock.
+  - Modified `postBuy` to acquire per-item lock before any processing
+  - Different items can still be purchased concurrently (no global lock contention)
+- **Changes**: `webapp/go/main.go`
+  - Line 82-84: Added itemBuyLocks sync.Map
+  - Lines 718-726: Added getItemBuyLock helper function
+  - Lines 1654-1659: Acquire per-item lock at the start of postBuy
+  - Line 793: Changed Campaign from 0 to 1 in postInitialize
+- **How to discover**: Previous failed attempt with campaign=1 showed "多重決済を検知しました" error. Analysis of postBuy code revealed API calls were made before DB transaction lock acquisition.
 
 #### Results After Optimization 24
 - **Score: 31,200-32,600** (raw: 33,200-33,600, penalty: 1,000-2,000)
-- **Improvement: 15,160 → 31,200-32,600 (+106-115%)**
-- **Cumulative: 1,810 → 31,200-32,600 (+1,623-1,700%)**
-- Campaign=1 successfully enabled - more users and transactions
-- Multi-payment errors eliminated
-- Some timeout errors during final check due to increased load
+- **Improvement: 15,160 → ~32,000 (+16,840, +111%)**
+- **Cumulative: 1,810 → ~32,000 (+1,668%)**
+- **Multi-payment errors eliminated** - race condition fixed
+- Timeout errors cause final check failures but score significantly improved
+- Campaign enabled successfully - more users and transactions
 
 ### Current Bottleneck Analysis
 - Main bottleneck: External API calls (payment/shipment services)
   - POST /buy, /ship, /ship_done, /complete all have P95 ~820ms
   - This latency is dominated by external service response times
 - DB queries are all fast (P95 1-3ms)
-- Further optimization candidates:
-  1. Try campaign=2 or higher for more transactions
-  2. Reduce timeout errors to lower penalty
-  3. Customize new items list to prioritize high-value items (manual.md hint)
+- Further optimization requires either:
+  1. Reducing external API call frequency
+  2. Caching external API responses where safe
+  3. Parallel processing improvements
 

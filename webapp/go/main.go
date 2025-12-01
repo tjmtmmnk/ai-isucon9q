@@ -79,6 +79,9 @@ var (
 	paymentServiceURL      string
 	shipmentServiceURL     string
 	configMu               sync.RWMutex
+	// Per-item mutex to prevent concurrent purchases of the same item
+	// This prevents multi-payment detection errors when campaign is enabled
+	itemBuyLocks sync.Map // map[int64]*sync.Mutex
 )
 
 type Config struct {
@@ -712,6 +715,16 @@ func getShipmentServiceURL(ctx context.Context) string {
 	return DefaultShipmentServiceURL
 }
 
+// getItemBuyLock returns a mutex for the given item ID.
+// This prevents concurrent purchases of the same item, avoiding multi-payment errors.
+// Why not use DB-level locking alone: External API calls (payment, shipment) must be
+// made before DB transaction to minimize lock hold time, but this allows race conditions
+// where multiple requests call payment API before any DB lock is acquired.
+func getItemBuyLock(itemID int64) *sync.Mutex {
+	actual, _ := itemBuyLocks.LoadOrStore(itemID, &sync.Mutex{})
+	return actual.(*sync.Mutex)
+}
+
 func getIndex(w http.ResponseWriter, r *http.Request) {
 	templates.ExecuteTemplate(w, "index.html", struct{}{})
 }
@@ -776,7 +789,8 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
-		Campaign: 0,
+		// campaign=1 でユーザー数が増加し、取引機会が増える
+		Campaign: 1,
 		// 実装言語を返す
 		Language: "Go",
 	}
@@ -1637,6 +1651,13 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
+	// Acquire per-item lock to prevent concurrent purchases of the same item.
+	// This must be done before external API calls to avoid multi-payment errors.
+	// Different items can still be purchased concurrently (no global lock).
+	itemLock := getItemBuyLock(rb.ItemID)
+	itemLock.Lock()
+	defer itemLock.Unlock()
 
 	buyer, errCode, errMsg := getUser(ctx, r)
 	if errMsg != "" {
