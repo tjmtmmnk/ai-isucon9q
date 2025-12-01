@@ -377,13 +377,31 @@
 - **Impact**: Neutral (login frequency is low during benchmark)
 - DB queries for login eliminated but main bottleneck remains external API calls (P95 820-824ms)
 
+### Optimization 24: Enable Campaign=1 with Per-Item Mutex
+- **Implementation**: Add per-item mutex to prevent multi-payment errors and enable campaign=1
+- **Rationale**: Previous attempt at campaign=1 failed with "多重決済を検知しました" (multi-payment detected) error. Root cause: postBuy optimization moved external API calls outside DB transaction, allowing concurrent purchases of the same item to both succeed at payment API before DB lock is acquired.
+- **Changes**: `webapp/go/main.go`
+  - Added `itemBuyLocks sync.Map` for per-item mutex storage
+  - Added `getItemBuyLock(itemID int64) *sync.Mutex` helper function
+  - Modified `postBuy()` to acquire item-specific lock before any processing
+  - Changed `postInitialize()` to return `campaign: 1` instead of 0
+- **How to discover**: Manual.md states campaign=1-4 increases users/transactions. Previous attempt failed with multi-payment error. Code analysis revealed race condition in postBuy where concurrent requests could both call payment API before DB lock.
+
+#### Results After Optimization 24
+- **Score: 31,200-32,600** (raw: 33,200-33,600, penalty: 1,000-2,000)
+- **Improvement: 15,160 → 31,200-32,600 (+106-115%)**
+- **Cumulative: 1,810 → 31,200-32,600 (+1,623-1,700%)**
+- Campaign=1 successfully enabled - more users and transactions
+- Multi-payment errors eliminated
+- Some timeout errors during final check due to increased load
+
 ### Current Bottleneck Analysis
 - Main bottleneck: External API calls (payment/shipment services)
   - POST /buy, /ship, /ship_done, /complete all have P95 ~820ms
   - This latency is dominated by external service response times
 - DB queries are all fast (P95 1-3ms)
-- Further optimization requires either:
-  1. Reducing external API call frequency
-  2. Caching external API responses where safe
-  3. Parallel processing improvements
+- Further optimization candidates:
+  1. Try campaign=2 or higher for more transactions
+  2. Reduce timeout errors to lower penalty
+  3. Customize new items list to prioritize high-value items (manual.md hint)
 
