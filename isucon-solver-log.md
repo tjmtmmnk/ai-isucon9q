@@ -484,10 +484,33 @@
 - **Campaign=4 now stable** - all 4 runs passed benchmark
 - Parallel API calls reduced getTransactions latency from O(N*800ms) to O(800ms)
 
+### Optimization 28: MySQL Additional Performance Tuning
+- **Implementation**: Add additional MySQL performance settings
+- **Rationale**: CPU usage high (peak 327%), loadavg 7.29. Added settings to improve thread handling and I/O performance.
+- **Changes**: `webapp/etc/conf.d/my.cnf`
+  - `thread_cache_size = 100` - Cache threads to reduce creation overhead
+  - `innodb_thread_concurrency = 0` - Automatic concurrency control
+  - `innodb_read_io_threads = 4` - Parallel I/O reads
+  - `innodb_write_io_threads = 4` - Parallel I/O writes
+  - `innodb_io_capacity = 2000` - SSD I/O capacity
+  - `innodb_io_capacity_max = 4000` - Max I/O capacity
+  - `innodb_buffer_pool_instances = 2` - Buffer pool concurrency
+  - `table_open_cache = 4000` - Table handle caching
+  - `table_definition_cache = 2000` - Table definition caching
+  - `sync_binlog = 0` - Reduce binary log sync overhead
+- **How to discover**: Mackerel Host Metrics showed CPU user 327%, loadavg5 7.29. MySQL optimization helps reduce DB overhead under high load.
+
+#### Results After Optimization 28
+- **Score: 42,640** (pass, no penalty)
+- **Impact: Neutral** - within variance range of 42,760-44,880
+- DB queries remain fast (P95 1-3ms)
+- Timeout errors due to external API call latency (not MySQL)
+
 ### Current Bottleneck Analysis
 - Main bottleneck: External API calls (payment/shipment services)
   - POST /buy, /ship, /ship_done, /complete all have P95 ~800-1800ms
   - This latency is dominated by external service response times
 - DB queries are all fast (P95 1-3ms)
 - Campaign=4 enabled with parallel APIShipmentStatus optimization
+- Infrastructure tuning (MySQL, Nginx) already at good levels
 
