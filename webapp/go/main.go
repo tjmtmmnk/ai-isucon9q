@@ -67,17 +67,18 @@ const (
 )
 
 var (
-	templates          *template.Template
-	dbx                *sqlx.DB
-	store              sessions.Store
-	categoryCache      map[int]Category
-	childCategoryCache map[int][]int // parent_id -> child_ids
-	categoryMu         sync.RWMutex
-	userCache          map[int64]User
-	userMu             sync.RWMutex
-	paymentServiceURL  string
-	shipmentServiceURL string
-	configMu           sync.RWMutex
+	templates              *template.Template
+	dbx                    *sqlx.DB
+	store                  sessions.Store
+	categoryCache          map[int]Category
+	childCategoryCache     map[int][]int // parent_id -> child_ids
+	categoryMu             sync.RWMutex
+	userCache              map[int64]User
+	userCacheByAccountName map[string]User // account_name -> User for login lookups
+	userMu                 sync.RWMutex
+	paymentServiceURL      string
+	shipmentServiceURL     string
+	configMu               sync.RWMutex
 )
 
 type Config struct {
@@ -486,8 +487,10 @@ func loadUsers(ctx context.Context) error {
 	defer userMu.Unlock()
 
 	userCache = make(map[int64]User, len(users))
+	userCacheByAccountName = make(map[string]User, len(users))
 	for _, u := range users {
 		userCache[u.ID] = u
+		userCacheByAccountName[u.AccountName] = u
 	}
 
 	return nil
@@ -525,6 +528,41 @@ func setUserCache(user User) {
 	if userCache != nil {
 		userCache[user.ID] = user
 	}
+	if userCacheByAccountName != nil {
+		userCacheByAccountName[user.AccountName] = user
+	}
+}
+
+// getUserByAccountNameFromCache retrieves user by account_name from cache
+// Falls back to DB query if cache miss, and updates cache
+func getUserByAccountNameFromCache(ctx context.Context, accountName string) (User, error) {
+	userMu.RLock()
+	if userCacheByAccountName != nil {
+		if u, ok := userCacheByAccountName[accountName]; ok {
+			userMu.RUnlock()
+			return u, nil
+		}
+	}
+	userMu.RUnlock()
+
+	// Cache miss - fetch from DB and cache
+	user := User{}
+	err := dbx.GetContext(ctx, &user, "SELECT * FROM `users` WHERE `account_name` = ?", accountName)
+	if err != nil {
+		return user, err
+	}
+
+	// Update both caches
+	userMu.Lock()
+	if userCache != nil {
+		userCache[user.ID] = user
+	}
+	if userCacheByAccountName != nil {
+		userCacheByAccountName[accountName] = user
+	}
+	userMu.Unlock()
+
+	return user, nil
 }
 
 func loadCategories(ctx context.Context) error {
@@ -2561,8 +2599,8 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u := User{}
-	err = dbx.GetContext(ctx, &u, "SELECT * FROM `users` WHERE `account_name` = ?", accountName)
+	// Use account_name cache for faster login lookups
+	u, err := getUserByAccountNameFromCache(ctx, accountName)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusUnauthorized, "アカウント名かパスワードが間違えています")
 		return
