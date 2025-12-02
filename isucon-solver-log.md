@@ -1,704 +1,771 @@
-# ISUCON Solver Log
+# ISUCON ソルバー ログ
 
-### Baseline Benchmark
-- **Score: 1810**
-- Multiple timeout errors observed on `/users/transactions.json`, `/new_items.json`, `/login`
+## ベースラインベンチマーク
+- **スコア: 1810**
+- `/users/transactions.json`、`/new_items.json`、`/login` で複数のタイムアウトエラーを観測
 
-### Optimization 1: Category Caching
-- **Implementation**: Cache all categories in memory at startup and after initialization
-- **Changes**: `webapp/go/main.go`
-  - Added `categoryCache` map with RWMutex
-  - Added `loadCategories()` function to load all categories into cache
-  - Modified `getCategoryByID()` to use cache first
-  - Called `loadCategories()` in `main()` and `postInitialize()`
-- **How to discover**: Mackerel DB Query Stats
+---
 
-#### Results After Optimization 1
-- **Score: 2010 (+200, +11%)**
-- Category queries eliminated from top queries (was 105,857 executions → now 10 cache loads)
+## 最適化 1: カテゴリキャッシュ
+- **実装内容**: 起動時と初期化後に全カテゴリをメモリにキャッシュ
+- **変更ファイル**: `webapp/go/main.go`
+  - RWMutex付きの `categoryCache` マップを追加
+  - 全カテゴリをキャッシュに読み込む `loadCategories()` 関数を追加
+  - `getCategoryByID()` をキャッシュ優先に変更
+  - `main()` と `postInitialize()` で `loadCategories()` を呼び出し
+- **発見方法**: Mackerel DB Query Stats
 
-### Optimization 2: User Caching
-- **Implementation**: Cache users in memory with cache invalidation on updates
-- **Changes**: `webapp/go/main.go`
-  - Added `userCache` map with RWMutex
-  - Added `loadUsers()` function to load all users into cache
-  - Added `getUserByIDFromCache()` function for cache-first lookups
-  - Added `setUserCache()` function for cache updates
-  - Modified `getUserSimpleByID()` to use cache when not in transaction
-  - Updated `postRegister()`, `postSell()`, `postBump()` to update cache
-- **How to discover**: Mackerel DB Query Stats
+### 最適化 1 の結果
+- **スコア: 2010 (+200, +11%)**
+- カテゴリクエリがトップクエリから消失（105,857回実行 → 10回のキャッシュロード）
 
-#### Results After Optimization 2
-- **Score: 2210 (+200, +10%)**
-- **Cumulative: 1810 → 2210 (+22%)**
-- User queries eliminated from top 20 (was 43,687 executions, 73,320ms)
+---
 
-### Optimization 3: Database Indexes for Items Table
-- **Implementation**: Add composite indexes for common query patterns
-- **Changes**: `webapp/sql/01_schema.sql`
-  - Added `idx_status_created_id (status, created_at, id)` for new items queries
-  - Added `idx_seller_status_created_id (seller_id, status, created_at, id)` for user items queries
-  - Added `idx_buyer_created_id (buyer_id, created_at, id)` for transaction queries
-- **Also fixed**: `getUserSimpleByID()` to always use cache (was bypassing cache in transactions)
-- **How to discover**: Mackerel DB Query Stats
+## 最適化 2: ユーザーキャッシュ
+- **実装内容**: 更新時のキャッシュ無効化付きでユーザーをメモリにキャッシュ
+- **変更ファイル**: `webapp/go/main.go`
+  - RWMutex付きの `userCache` マップを追加
+  - 全ユーザーをキャッシュに読み込む `loadUsers()` 関数を追加
+  - キャッシュ優先検索の `getUserByIDFromCache()` 関数を追加
+  - キャッシュ更新用の `setUserCache()` 関数を追加
+  - トランザクション外ではキャッシュを使用するよう `getUserSimpleByID()` を変更
+  - `postRegister()`、`postSell()`、`postBump()` でキャッシュを更新
+- **発見方法**: Mackerel DB Query Stats
 
-#### Results After Optimization 3
-- **Score: 2610 (+400, +18%)**
-- **Cumulative: 1810 → 2610 (+44%)**
-- Items queries now use indexes instead of full table scans
-- Previous slow queries (P95 ~1200ms) now significantly faster
+### 最適化 2 の結果
+- **スコア: 2210 (+200, +10%)**
+- **累計: 1810 → 2210 (+22%)**
+- ユーザークエリがトップ20から消失（43,687回実行、73,320ms）
 
-### Optimization 4: Skip External API Calls for Terminal States
-- **Implementation**: Skip `APIShipmentStatus` call in `getTransactions` when shipping status is already "done"
-- **Rationale**: "done" is a terminal state that won't change, so external API call is unnecessary
-- **Changes**: `webapp/go/main.go`
-  - Modified `getTransactions()` to check `shipping.Status` before calling external API
-  - If status is `ShippingsStatusDone`, use DB value directly instead of calling API
-  - This eliminates N external API calls for completed transactions
-- **How to discover**: Mackerel HTTP Server Stats
+---
 
-#### Results After Optimization 4
-- **Score: 4550 (+1940, +74%)**
-- **Cumulative: 1810 → 4550 (+151%)**
-- Significant reduction in external API calls during transaction listing
-- One timeout error occurred (-500 penalty) during high load
+## 最適化 3: items テーブルへのデータベースインデックス追加
+- **実装内容**: よく使うクエリパターン向けの複合インデックスを追加
+- **変更ファイル**: `webapp/sql/01_schema.sql`
+  - 新着商品クエリ用に `idx_status_created_id (status, created_at, id)` を追加
+  - ユーザー商品クエリ用に `idx_seller_status_created_id (seller_id, status, created_at, id)` を追加
+  - 取引クエリ用に `idx_buyer_created_id (buyer_id, created_at, id)` を追加
+- **追加修正**: `getUserSimpleByID()` が常にキャッシュを使用するよう修正（トランザクション内でキャッシュをバイパスしていた）
+- **発見方法**: Mackerel DB Query Stats
 
-### Optimization 5: Parallel API Calls in postBuy
-- **Implementation**: Execute APIShipmentCreate and APIPaymentToken in parallel using goroutines
-- **Rationale**: These two external API calls are independent and can run concurrently
-- **Changes**: `webapp/go/main.go`
-  - Used goroutines with channels to execute both API calls simultaneously
-  - Wait for both results before proceeding with transaction
-  - Error handling preserved - rollback on either failure
-- **How to discover**: Mackerel HTTP Server Stats - POST /buy had P95 of 2078ms
+### 最適化 3 の結果
+- **スコア: 2610 (+400, +18%)**
+- **累計: 1810 → 2610 (+44%)**
+- items クエリがフルテーブルスキャンではなくインデックスを使用するように
+- 以前の遅いクエリ（P95 約1200ms）が大幅に高速化
 
-#### Results After Optimization 5
-- **Score: 4850**
-- **Cumulative: 1810 → 4850 (+168%)**
-- Score variance observed due to timeout penalties
-- POST /buy latency reduced by eliminating sequential API wait times
+---
 
-### Optimization 6: Batch Fetch in getTransactions
-- **Implementation**: Batch fetch transaction_evidences and shippings using IN clause
-- **Rationale**: N+1 problem - each item triggered individual queries for transaction_evidences and shippings
-- **Changes**: `webapp/go/main.go`
-  - Collect all item IDs upfront
-  - Batch fetch all transaction_evidences with `WHERE item_id IN (...)`
-  - Batch fetch all shippings with `WHERE transaction_evidence_id IN (...)`
-  - Use maps for O(1) lookup in the main loop
-- **How to discover**: Mackerel HTTP Server Stats - GET /users/transactions.json had P95 of 5668ms (slowest endpoint)
+## 最適化 4: 終端状態での外部APIコールをスキップ
+- **実装内容**: `getTransactions` で配送ステータスが「done」の場合は `APIShipmentStatus` コールをスキップ
+- **理由**: 「done」は変更されない終端状態のため、外部APIコールは不要
+- **変更ファイル**: `webapp/go/main.go`
+  - `getTransactions()` で外部API呼び出し前に `shipping.Status` をチェックするよう変更
+  - ステータスが `ShippingsStatusDone` の場合、APIコールの代わりにDB値を直接使用
+  - 完了した取引のN回の外部APIコールを削減
+- **発見方法**: Mackerel HTTP Server Stats
 
-#### Results After Optimization 6
-- **Score: 5650**
-- **Cumulative: 1810 → 5650 (+212%)**
-- Eliminated 2N database queries per getTransactions request
-- GET /users/transactions.json now more efficient
+### 最適化 4 の結果
+- **スコア: 4550 (+1940, +74%)**
+- **累計: 1810 → 4550 (+151%)**
+- 取引一覧での外部APIコールが大幅に削減
+- 高負荷時に1回のタイムアウトエラー発生（-500ペナルティ）
 
-### Optimization 7: Child Category ID Caching
-- **Implementation**: Cache child category IDs in memory to avoid repeated DB queries
-- **Rationale**: `SELECT id FROM categories WHERE parent_id=?` was executed 612 times (N+1 problem in getNewCategoryItems)
-- **Changes**: `webapp/go/main.go`
-  - Added `childCategoryCache map[int][]int` to store parent_id -> child_ids mapping
-  - Updated `loadCategories()` to build the child category cache
-  - Added `getChildCategoryIDs(parentID int) []int` helper function
-  - Modified `getNewCategoryItems()` to use cache instead of DB query
-- **How to discover**: Mackerel DB Query Stats - SELECT id FROM categories WHERE parent_id=? was executed 612 times with P95 of 83ms
+---
 
-#### Results After Optimization 7
-- **Score: 4950** (variance due to timeout errors)
-- Note: This optimization eliminates DB queries but the impact is small compared to other bottlenecks (items queries with P95 965-1192ms, external API calls)
+## 最適化 5: postBuy での並列APIコール
+- **実装内容**: APIShipmentCreate と APIPaymentToken をゴルーチンで並列実行
+- **理由**: これら2つの外部APIコールは独立しており、同時実行可能
+- **変更ファイル**: `webapp/go/main.go`
+  - ゴルーチンとチャネルを使用して両方のAPIコールを同時実行
+  - 両方の結果を待ってから取引を続行
+  - エラー処理は維持 - どちらかが失敗したらロールバック
+- **発見方法**: Mackerel HTTP Server Stats - POST /buy の P95 が 2078ms
 
-### Optimization 8: Move External API Calls Outside DB Transactions
-- **Implementation**: Move `APIShipmentStatus` calls before starting DB transaction in `postShipDone` and `postComplete`
-- **Rationale**: External API calls were made while holding database locks (`FOR UPDATE`), causing:
-  - Long lock hold times during slow API responses
-  - Other requests blocked on the same rows
-  - Timeouts and errors leading to inconsistent state
-- **Changes**: `webapp/go/main.go`
-  - `postShipDone`: Query shipping record before transaction, make API call, then start transaction for updates
-  - `postComplete`: Same pattern - API call before transaction
-  - Removed redundant `SELECT ... FOR UPDATE` on shippings table (only UPDATE needed)
-- **How to discover**: Mackerel HTTP Server Stats showed POST /ship_done with 3.8% error rate and POST /complete with 1.7% error rate. Code review revealed API calls inside transaction blocks holding locks.
+### 最適化 5 の結果
+- **スコア: 4850**
+- **累計: 1810 → 4850 (+168%)**
+- タイムアウトペナルティによりスコアに変動あり
+- 順次API待機時間の削減により POST /buy のレイテンシが低下
 
-#### Results After Optimization 8
-- **Score: 4850 (+1300 from 3550, +37%)**
-- **No final check failures** (previously had "購入されたはずなのに記録されていません")
-- Transaction completion reliability improved
-- Reduced lock contention during external API calls
+---
 
-### Optimization 9: Fix getUser to Use Cache
-- **Implementation**: Modify `getUser()` function to use `getUserByIDFromCache()` instead of direct DB query
-- **Rationale**: `getUser()` is called on every authenticated request (12 call sites) but was bypassing the user cache
-- **Changes**: `webapp/go/main.go`
-  - Changed `getUser()` to call `getUserByIDFromCache()` instead of direct `SELECT * FROM users WHERE id = ?`
-- **How to discover**: Mackerel DB Query Stats showed `SELECT * FROM users WHERE id = ?` with 2339 executions despite user cache being implemented
+## 最適化 6: getTransactions でのバッチ取得
+- **実装内容**: IN句を使用して transaction_evidences と shippings をバッチ取得
+- **理由**: N+1問題 - 各商品が transaction_evidences と shippings に対して個別クエリを発行していた
+- **変更ファイル**: `webapp/go/main.go`
+  - 最初に全商品IDを収集
+  - `WHERE item_id IN (...)` で全 transaction_evidences をバッチ取得
+  - `WHERE transaction_evidence_id IN (...)` で全 shippings をバッチ取得
+  - メインループでO(1)検索用のマップを使用
+- **発見方法**: Mackerel HTTP Server Stats - GET /users/transactions.json の P95 が 5668ms（最も遅いエンドポイント）
 
-#### Results After Optimization 9
-- User queries eliminated from DB query stats top 20
-- Score variance unchanged but queries reduced
+### 最適化 6 の結果
+- **スコア: 5650**
+- **累計: 1810 → 5650 (+212%)**
+- getTransactions リクエストごとに 2N のデータベースクエリを削減
+- GET /users/transactions.json がより効率的に
 
-### Optimization 10: Add Composite Index for Category Queries
-- **Implementation**: Add index `idx_category_status_created_id (category_id, status, created_at, id)` for category-based item queries
-- **Rationale**: Category queries used `category_id IN (...)` with status and created_at, but existing index didn't include category_id
-- **Changes**: `webapp/sql/01_schema.sql`
-  - Added `INDEX idx_category_status_created_id (category_id, status, created_at, id)`
-- **How to discover**: Mackerel DB Query Stats showed category queries with P95 700-900ms
+---
 
-#### Results After Optimization 10
-- Minor improvement in category query performance
+## 最適化 7: 子カテゴリIDキャッシュ
+- **実装内容**: 繰り返しのDBクエリを避けるため、子カテゴリIDをメモリにキャッシュ
+- **理由**: `SELECT id FROM categories WHERE parent_id=?` が612回実行されていた（getNewCategoryItems での N+1問題）
+- **変更ファイル**: `webapp/go/main.go`
+  - parent_id → child_ids マッピングを格納する `childCategoryCache map[int][]int` を追加
+  - 子カテゴリキャッシュを構築するよう `loadCategories()` を更新
+  - `getChildCategoryIDs(parentID int) []int` ヘルパー関数を追加
+  - DBクエリの代わりにキャッシュを使用するよう `getNewCategoryItems()` を変更
+- **発見方法**: Mackerel DB Query Stats - `SELECT id FROM categories WHERE parent_id=?` が612回実行、P95 83ms
 
-### Optimization 11: Avoid SELECT * in Item Listing Queries
-- **Implementation**: Select only necessary columns instead of `SELECT *` in getNewItems and getNewCategoryItems
-- **Rationale**: `SELECT *` retrieves `description` (TEXT field) which is not needed for item listing and adds I/O overhead
-- **Changes**: `webapp/go/main.go`
-  - Changed `getNewItems()` queries to select only: id, seller_id, status, name, price, image_name, category_id, created_at
-  - Changed `getNewCategoryItems()` queries similarly
-- **How to discover**: Mackerel DB Query Stats showed `SELECT * FROM items` queries with P95 1000-1700ms
+### 最適化 7 の結果
+- **スコア: 4950**（タイムアウトエラーによる変動）
+- 注: この最適化はDBクエリを削減するが、他のボトルネック（P95 965-1192ms の items クエリ、外部APIコール）と比較すると影響は小さい
 
-#### Results After Optimization 11
-- **Score: 5860-6860** (raw: 6750-7360 with timeout penalties)
-- **Cumulative: 1810 → ~6500 average (+260%)**
-- Significant reduction in item query I/O by excluding TEXT column
+---
 
-### Optimization 12: Move External API Calls Outside DB Transaction in postBuy
-- **Implementation**: Refactor `postBuy` to make external API calls before starting the database transaction
-- **Rationale**: The original implementation held database locks (`FOR UPDATE` on items and users) while making slow external API calls (500-1000ms). This caused:
-  - Long lock hold times blocking other buy requests
-  - Timeouts and errors leading to inconsistent state
-  - Final check failures ("購入されたはずなのに記録されていません")
-- **Changes**: `webapp/go/main.go`
-  - Read item and seller info without lock initially
-  - Make parallel external API calls (shipment + payment) before transaction
-  - Start transaction only after API calls complete
-  - Re-verify item status with `FOR UPDATE` lock before committing
-  - Lock hold time reduced from (API time + DB time) to just (DB time)
-- **How to discover**: Mackerel HTTP Server Stats showed POST /buy with 5.3% error rate (highest among transaction endpoints) and P95 of 999ms. Code analysis revealed API calls inside transaction holding locks.
+## 最適化 8: 外部APIコールをDBトランザクション外に移動
+- **実装内容**: `postShipDone` と `postComplete` でDBトランザクション開始前に `APIShipmentStatus` コールを移動
+- **理由**: 外部APIコールがデータベースロック（`FOR UPDATE`）を保持したまま実行されており、以下の問題を引き起こしていた:
+  - 遅いAPI応答時のロック保持時間が長い
+  - 同じ行で他のリクエストがブロックされる
+  - タイムアウトやエラーによる不整合状態
+- **変更ファイル**: `webapp/go/main.go`
+  - `postShipDone`: トランザクション前にshippingレコードをクエリし、APIコールを行い、更新用のトランザクションを開始
+  - `postComplete`: 同じパターン - トランザクション前にAPIコール
+  - shippingsテーブルへの冗長な `SELECT ... FOR UPDATE` を削除（UPDATEのみ必要）
+- **発見方法**: Mackerel HTTP Server Stats で POST /ship_done が3.8%エラー率、POST /complete が1.7%エラー率。コードレビューでトランザクションブロック内のAPIコールがロックを保持していることを発見。
 
-#### Results After Optimization 12
-- **Score: 6650** (raw: 6650, penalty: 0)
-- **Cumulative: 1810 → 6650 (+267%)**
-- **Final check errors eliminated** (previously 4 errors: "購入されたはずなのに記録されていません")
-- Lock contention significantly reduced
-- Transaction reliability improved
+### 最適化 8 の結果
+- **スコア: 4850（3550から+1300, +37%）**
+- **最終チェック失敗なし**（以前は「購入されたはずなのに記録されていません」エラー）
+- 取引完了の信頼性が向上
+- 外部APIコール中のロック競合を削減
 
-### Optimization 13: Move External API Calls Outside DB Transaction in postShip
-- **Implementation**: Refactor `postShip` to make external API call (`APIShipmentRequest`) before starting the database transaction
-- **Rationale**: Same pattern as postBuy - the original implementation held database locks (on items, transaction_evidences, shippings) while making slow external API calls, causing lock contention
-- **Changes**: `webapp/go/main.go`
-  - Read transaction_evidence, item, and shipping data without locks initially
-  - Make `APIShipmentRequest` API call before starting transaction
-  - Start transaction only after API call completes
-  - Re-verify state with `FOR UPDATE` locks before committing
-- **How to discover**: Mackerel HTTP Server Stats showed POST /ship with P95 of 992ms
+---
 
-#### Results After Optimization 13
-- **Score: 6350** (raw: 6850, penalty: 500)
-- Raw score improved: 6650 → 6850 (+200)
-- Penalty due to timeout variance
-- Lock hold time reduced in postShip
+## 最適化 9: getUser をキャッシュ使用に修正
+- **実装内容**: `getUser()` 関数を直接DBクエリではなく `getUserByIDFromCache()` を使用するよう変更
+- **理由**: `getUser()` は認証済みリクエストごとに呼び出される（12箇所）が、ユーザーキャッシュをバイパスしていた
+- **変更ファイル**: `webapp/go/main.go`
+  - `getUser()` を直接 `SELECT * FROM users WHERE id = ?` ではなく `getUserByIDFromCache()` を呼び出すよう変更
+- **発見方法**: Mackerel DB Query Stats で、ユーザーキャッシュ実装済みにもかかわらず `SELECT * FROM users WHERE id = ?` が2339回実行されていた
 
-### Optimization 14: MySQL Configuration Tuning
-- **Implementation**: Optimize MySQL settings for better performance
-- **Rationale**: CPU usage was high (110% peak), loadavg 3-4, system was CPU-bound
-- **Changes**: `webapp/etc/conf.d/my.cnf`
-  - `innodb_buffer_pool_size = 512M` - Buffer pool for data caching (MySQL has 1GB limit)
-  - `innodb_log_file_size = 256M` - Larger redo logs for write performance
-  - `innodb_flush_log_at_trx_commit = 2` - Flush log every second instead of every transaction
-  - `innodb_flush_method = O_DIRECT` - Direct I/O to avoid double buffering
-  - `skip-name-resolve` - Skip DNS lookup for faster connections
-  - `max_connections = 200` - Ensure enough connections
-- **How to discover**: Mackerel Host Metrics showed CPU at 110%, loadavg5 at 3-4
+### 最適化 9 の結果
+- ユーザークエリがDB Query Stats トップ20から消失
+- スコアの変動は変わらないがクエリ数は削減
 
-#### Results After Optimization 14
-- **Score: 6250** (raw: 6750, penalty: 500)
-- Score stable in 6200-6650 range
-- MySQL configuration now optimized for workload
+---
 
-### Optimization 15: Use Category Cache in getSettings
-- **Implementation**: Use `getAllCategoriesFromCache()` instead of DB query in `getSettings`
-- **Rationale**: `getSettings` was executing `SELECT * FROM categories` on every request despite having a pre-loaded category cache
-- **Changes**: `webapp/go/main.go`
-  - Added `getAllCategoriesFromCache()` helper function to return all categories from cache
-  - Modified `getSettings()` to use cache instead of DB query
-- **How to discover**: Mackerel MCP unavailable, grep search for `SELECT * FROM categories` found DB query in getSettings despite categoryCache already existing
+## 最適化 10: カテゴリクエリ用複合インデックス追加
+- **実装内容**: カテゴリベースの商品クエリ用にインデックス `idx_category_status_created_id (category_id, status, created_at, id)` を追加
+- **理由**: カテゴリクエリは status と created_at を伴う `category_id IN (...)` を使用していたが、既存のインデックスには category_id が含まれていなかった
+- **変更ファイル**: `webapp/sql/01_schema.sql`
+  - `INDEX idx_category_status_created_id (category_id, status, created_at, id)` を追加
+- **発見方法**: Mackerel DB Query Stats でカテゴリクエリの P95 が700-900ms
 
-#### Results After Optimization 15
-- **Score: 6150** (small improvement)
-- One less DB query per settings request
-- Impact limited because getSettings is not called as frequently as other endpoints
+### 最適化 10 の結果
+- カテゴリクエリパフォーマンスが若干改善
 
-### Optimization 16: Optimize getUserItems Query
-- **Implementation**: Select only needed columns instead of `SELECT *` in getUserItems
-- **Rationale**: `description` TEXT field is not needed in the response but was being retrieved
-- **Changes**: `webapp/go/main.go`
-  - Changed query to select only: id, seller_id, status, name, price, image_name, category_id, created_at
-- **How to discover**: Previous Optimization 11 applied column selection to getNewItems/getNewCategoryItems. Grep search for `SELECT \* FROM.*items.*seller_id` found getUserItems still using SELECT * pattern
+---
 
-#### Results After Optimization 16
-- **Score: ~5150-6150** (high variance due to timeouts)
-- Raw score improved but timeout penalties cause variance
-- Final check failures occur when buy requests timeout under high load
+## 最適化 11: 商品一覧クエリで SELECT * を回避
+- **実装内容**: getNewItems と getNewCategoryItems で `SELECT *` の代わりに必要なカラムのみを選択
+- **理由**: `SELECT *` は商品一覧に不要で I/O オーバーヘッドを増やす `description`（TEXTフィールド）を取得していた
+- **変更ファイル**: `webapp/go/main.go`
+  - `getNewItems()` のクエリを id, seller_id, status, name, price, image_name, category_id, created_at のみ選択に変更
+  - `getNewCategoryItems()` のクエリも同様に変更
+- **発見方法**: Mackerel DB Query Stats で `SELECT * FROM items` クエリの P95 が1000-1700ms
 
-### Optimization 17: Optimize Nginx Configuration
-- **Implementation**: Comprehensive nginx optimization
-- **Rationale**: Nginx was proxying all requests including static files, adding unnecessary overhead
-- **Changes**: `webapp/etc/nginx/conf.d/default.conf`
-  - Added upstream block with keepalive connections (32 connections)
-  - Enabled gzip compression for text content types
-  - Serve static files (css, js, img, upload) directly from nginx
-  - Use HTTP/1.1 with keepalive for proxy connections
-- **How to discover**: Benchmark showed timeouts across many different endpoints (login, sell, items, new_items, transactions) simultaneously, suggesting infrastructure-level bottleneck rather than specific endpoint. Checked nginx config and found minimal configuration with no static file serving or connection optimization
+### 最適化 11 の結果
+- **スコア: 5860-6860**（raw: 6750-7360、タイムアウトペナルティあり）
+- **累計: 1810 → 約6500平均 (+260%)**
+- TEXTカラムを除外することで商品クエリのI/Oが大幅に削減
 
-#### Results After Optimization 17
-- **Score: 6550-7460** (significant improvement!)
-- **No final check failures** - stability improved
-- **Cumulative: 1810 → 7460 (+312%)**
-- Static file serving offloaded from Go app to nginx
-- Reduced connection overhead with keepalive
+---
 
-### Optimization Attempt 18 (FAILED): Parallel APIShipmentStatus in getTransactions
-- **Attempted Implementation**: Parallelize `APIShipmentStatus` API calls in `getTransactions` using goroutines
-- **Rationale**: Mackerel HTTP Server Stats showed GET /users/transactions.json with P95 of 986ms (257 requests). Sequential API calls for non-done shippings were identified as a potential bottleneck.
-- **Changes**:
-  - Collected all shippings that need API calls (status != ShippingsStatusDone)
-  - Made all API calls in parallel using goroutines and channels
-  - Stored results in a map for later use in the main loop
-- **How to discover**: Mackerel HTTP Server Stats showed GET /users/transactions.json as one of the slowest endpoints with P95 986ms
+## 最適化 12: postBuy で外部APIコールをDBトランザクション外に移動
+- **実装内容**: DBトランザクション開始前に外部APIコールを行うよう `postBuy` をリファクタリング
+- **理由**: 元の実装は遅い外部APIコール（500-1000ms）を行いながらデータベースロック（items と users への `FOR UPDATE`）を保持していた。これにより:
+  - 他の購入リクエストをブロックするロック保持時間が長い
+  - タイムアウトやエラーによる不整合状態
+  - 最終チェック失敗（「購入されたはずなのに記録されていません」）
+- **変更ファイル**: `webapp/go/main.go`
+  - 最初にロックなしで商品と出品者情報を読み取り
+  - トランザクション前に並列外部APIコール（配送 + 決済）を実行
+  - APIコール完了後にのみトランザクションを開始
+  - コミット前に `FOR UPDATE` ロックで商品ステータスを再確認
+  - ロック保持時間を（API時間 + DB時間）から（DB時間のみ）に削減
+- **発見方法**: Mackerel HTTP Server Stats で POST /buy が5.3%エラー率（取引エンドポイント中最高）、P95 が999ms。コード分析でAPIコールがロックを保持するトランザクション内で行われていることを発見。
 
-#### Results After Optimization Attempt 18
-- **Score: 2950** (raw: 5950, penalty: 3000)
-- **6 final check failures**: "購入されたはずなのに記録されていません" (purchases should have been recorded but weren't)
-- **Root cause analysis**: Parallel API calls likely caused resource contention or race conditions, leading to transaction failures
-- **Action**: Reverted the change
+### 最適化 12 の結果
+- **スコア: 6650**（raw: 6650、ペナルティ: 0）
+- **累計: 1810 → 6650 (+267%)**
+- **最終チェックエラー解消**（以前は4エラー: 「購入されたはずなのに記録されていません」）
+- ロック競合が大幅に削減
+- 取引の信頼性が向上
 
-### Optimization 18: Database Connection Pool Settings
-- **Implementation**: Add connection pool settings to optimize database connection handling
-- **Rationale**: No explicit connection pool settings were configured; system was CPU-bound with loadavg ~3.0
-- **Changes**: `webapp/go/main.go`
-  - Added `SetMaxOpenConns(50)` - limit maximum open connections
-  - Added `SetMaxIdleConns(25)` - keep idle connections for reuse
-  - Added `SetConnMaxLifetime(5 * time.Minute)` - prevent stale connections
-- **How to discover**: Grep search for connection pool settings found none configured. Mackerel Host Metrics showed CPU usage at 94% during benchmark.
+---
 
-#### Results After Optimization 18
-- **Score: 6550** (within variance range of 6550-7560)
-- Impact: Neutral to slight improvement (helps with connection reuse under load)
-- Stability: No final check failures
+## 最適化 13: postShip で外部APIコールをDBトランザクション外に移動
+- **実装内容**: DBトランザクション開始前に外部APIコール（`APIShipmentRequest`）を行うよう `postShip` をリファクタリング
+- **理由**: postBuy と同じパターン - 元の実装は遅い外部APIコールを行いながらデータベースロック（items、transaction_evidences、shippings）を保持し、ロック競合を引き起こしていた
+- **変更ファイル**: `webapp/go/main.go`
+  - 最初にロックなしで transaction_evidence、item、shipping データを読み取り
+  - トランザクション開始前に `APIShipmentRequest` APIコールを実行
+  - APIコール完了後にのみトランザクションを開始
+  - コミット前に `FOR UPDATE` ロックで状態を再確認
+- **発見方法**: Mackerel HTTP Server Stats で POST /ship の P95 が992ms
 
-### Optimization 19: Use BETWEEN Instead of IN for Category Queries
-- **Implementation**: Replace `category_id IN (...)` with `category_id >= ? AND category_id <= ?` for child category queries
-- **Rationale**: Child category IDs are consecutive (e.g., parent 1 has children 2,3,4,5,6). Using BETWEEN allows MySQL to perform a single efficient range scan instead of multiple index lookups for each IN value.
-- **Changes**: `webapp/go/main.go`
-  - Added `getChildCategoryIDRange()` function that returns min/max category IDs for a parent
-  - Modified `getNewCategoryItems()` to use BETWEEN clause instead of IN clause
-  - Query changed from `category_id IN (2,3,4,5,6)` to `category_id >= 2 AND category_id <= 6`
-- **How to discover**: Mackerel DB Query Stats showed `SELECT ... FROM items WHERE status IN (?,?) AND category_id IN (...)` queries with P95 500-600ms. Verified category data showed consecutive IDs for child categories.
+### 最適化 13 の結果
+- **スコア: 6350**（raw: 6850、ペナルティ: 500）
+- rawスコア改善: 6650 → 6850 (+200)
+- タイムアウト変動によるペナルティ
+- postShip でのロック保持時間を削減
 
-#### Results After Optimization 19
-- **Score: 6750** (+700, +12%)
-- **Cumulative: 1810 → 6750 (+273%)**
-- **No final check failures** (previously 2 errors)
-- Query efficiency improved by using range scan instead of multiple point lookups
-- Stability improved - penalty reduced from 1000 to 0
+---
 
-### Optimization 20: Use UNION for getNewItems to Enable Index Usage
-- **Implementation**: Replace `status IN (?,?)` with UNION of two separate queries
-- **Rationale**: MySQL query planner chose full table scan (44,000 rows) when using `status IN (?,?)` because merging two sorted index ranges was deemed expensive. By using UNION, each subquery can use the index efficiently and only retrieve LIMIT rows.
-- **Performance measured**:
-  - Original query: 191ms (full table scan + filesort)
-  - UNION query: 2.4ms (index scan, 98 rows max)
-  - **80x faster for first page, 22x faster for pagination**
-- **Changes**: `webapp/go/main.go`
-  - Modified `getNewItems()` to use UNION ALL with separate status queries
-  - Each subquery uses index `idx_status_created_id` with backward scan
-  - Final UNION result only needs to sort 98 rows (49+49) instead of 44,000
-- **How to discover**: EXPLAIN showed `type: ALL` (full table scan) and `Using filesort` for original query. Testing single status showed `ref` type with `Backward index scan`, confirming IN clause caused the issue.
+## 最適化 14: MySQL 設定チューニング
+- **実装内容**: パフォーマンス向上のためMySQL設定を最適化
+- **理由**: CPU使用率が高い（ピーク110%）、loadavg 3-4、システムがCPUバウンド
+- **変更ファイル**: `webapp/etc/conf.d/my.cnf`
+  - `innodb_buffer_pool_size = 512M` - データキャッシュ用バッファプール（MySQL制限1GB）
+  - `innodb_log_file_size = 256M` - 書き込みパフォーマンス向上のため大きなredoログ
+  - `innodb_flush_log_at_trx_commit = 2` - 各トランザクションではなく毎秒ログをフラッシュ
+  - `innodb_flush_method = O_DIRECT` - 二重バッファリングを避けるダイレクトI/O
+  - `skip-name-resolve` - 高速接続のためDNSルックアップをスキップ
+  - `max_connections = 200` - 十分な接続数を確保
+- **発見方法**: Mackerel Host Metrics で CPU 110%、loadavg5 3-4
 
-#### Results After Optimization 20
-- **Score: 9160** (+2410, +36%)
-- **Cumulative: 1810 → 9160 (+406%)**
-- **No final check failures**
-- Items listing endpoints significantly faster
-- System can handle higher load with reduced query time
+### 最適化 14 の結果
+- **スコア: 6250**（raw: 6750、ペナルティ: 500）
+- スコアは 6200-6650 範囲で安定
+- MySQL設定がワークロード向けに最適化
 
-### Optimization 21: Use UNION for getNewCategoryItems
-- **Implementation**: Replace `status IN (?,?)` with UNION of two separate queries in `getNewCategoryItems`
-- **Rationale**: Same issue as Optimization 20 - MySQL query planner chose inefficient plan when using `status IN (?,?)`. Each subquery in UNION can use index efficiently.
-- **Changes**: `webapp/go/main.go`
-  - Modified `getNewCategoryItems()` to use UNION ALL with separate status queries
-  - Each subquery includes `category_id >= ? AND category_id <= ?` condition
-- **How to discover**: Mackerel DB Query Stats showed `SELECT ... FROM items WHERE status IN (?,?) AND category_id >= ?...` with P95 196ms (1095 executions). This was the slowest query.
+---
 
-#### Results After Optimization 21
-- **Score: 15160** (raw: 15160, penalty: 0)
-- **Improvement: 9160 → 15160 (+6000, +65%)**
-- **Cumulative: 1810 → 15160 (+737%)**
-- Category items queries significantly faster (P95 196ms → 3ms)
-- DB queries fully optimized - CPU usage dropped from 90-110% to 14-58%
+## 最適化 15: getSettings でカテゴリキャッシュを使用
+- **実装内容**: `getSettings` でDBクエリの代わりに `getAllCategoriesFromCache()` を使用
+- **理由**: `getSettings` はプリロードされたカテゴリキャッシュがあるにもかかわらず、リクエストごとに `SELECT * FROM categories` を実行していた
+- **変更ファイル**: `webapp/go/main.go`
+  - キャッシュから全カテゴリを返す `getAllCategoriesFromCache()` ヘルパー関数を追加
+  - DBクエリの代わりにキャッシュを使用するよう `getSettings()` を変更
+- **発見方法**: Mackerel MCP が利用不可、grep検索で categoryCache が既に存在するにもかかわらず getSettings 内で `SELECT * FROM categories` DBクエリを発見
 
-### Optimization Attempt (FAILED): Campaign=1
-- **Attempted**: Set campaign=1 to increase users and transactions
-- **Result**: Critical error "多重決済を検知しました" (multi-payment detected)
-- **Root cause**: Higher load caused race conditions with concurrent buy requests
-- **Action**: Reverted to campaign=0
+### 最適化 15 の結果
+- **スコア: 6150**（わずかな改善）
+- 設定リクエストごとのDBクエリが1つ減少
+- getSettings は他のエンドポイントほど頻繁に呼び出されないため影響は限定的
 
-### Optimization 22: Fallback to DB Value on API Timeout in getTransactions
-- **Implementation**: Instead of returning error when APIShipmentStatus fails, fallback to DB value
-- **Rationale**: External API calls (shipment /status) were causing timeouts which resulted in:
-  - 500 errors returned to client
-  - "商品数が正しくありません" errors from benchmarker (expected items not received)
-  - High penalty scores (-500 per timeout)
-- **Changes**: `webapp/go/main.go`
-  - Modified `getTransactions()` to continue with DB shipping status when API call fails
-  - DB value is usually accurate as it's updated by postShip, postShipDone, postComplete
-- **How to discover**: Mackerel HTTP Server Stats showed GET /users/transactions.json with P95 809ms and 1.4% error rate. App logs showed multiple "context canceled" errors for shipment /status API calls.
+---
 
-#### Results After Optimization 22
-- **Score: 14660** (raw: 15160, penalty: 500)
-- **Improvement: 13960 → 14660 (+700, +5%)**
-- **Cumulative: 1810 → 14660 (+710%)**
-- Error rate reduced: "商品数が正しくありません" errors decreased from 2 to 1
-- Penalty reduced from 1000 to 500
-- API timeout no longer causes getTransactions to fail completely
+## 最適化 16: getUserItems クエリの最適化
+- **実装内容**: getUserItems で `SELECT *` の代わりに必要なカラムのみを選択
+- **理由**: `description` TEXTフィールドはレスポンスに不要だが取得されていた
+- **変更ファイル**: `webapp/go/main.go`
+  - クエリを id, seller_id, status, name, price, image_name, category_id, created_at のみ選択に変更
+- **発見方法**: 以前の最適化11で getNewItems/getNewCategoryItems にカラム選択を適用。grep検索で getUserItems がまだ `SELECT *` パターンを使用していることを発見
 
-### Optimization 23: Account Name Cache for Login
-- **Implementation**: Add account_name -> User cache for faster login lookups
-- **Rationale**: Login queries (`SELECT * FROM users WHERE account_name = ?`) were executed 99 times with P95 66ms
-- **Changes**: `webapp/go/main.go`
-  - Added `userCacheByAccountName map[string]User` for account_name lookups
-  - Added `getUserByAccountNameFromCache()` function with cache-first lookup
-  - Updated `loadUsers()` to populate both ID and account_name caches
-  - Updated `setUserCache()` to maintain both caches
-  - Modified `postLogin()` to use cache instead of DB query
-- **How to discover**: Mackerel DB Query Stats showed `SELECT * FROM users WHERE account_name = ?` with 99 executions and P95 66ms
+### 最適化 16 の結果
+- **スコア: 約5150-6150**（タイムアウトによる高い変動）
+- rawスコアは改善したがタイムアウトペナルティで変動
+- 高負荷時の購入リクエストタイムアウトで最終チェック失敗が発生
 
-#### Results After Optimization 23
-- **Score: 15160** (raw: 15160, penalty: 0)
-- **Impact**: Neutral (login frequency is low during benchmark)
-- DB queries for login eliminated but main bottleneck remains external API calls (P95 820-824ms)
+---
 
-### Optimization 24: Enable Campaign=1 with Per-Item Mutex
-- **Implementation**: Add per-item mutex to prevent concurrent purchases and enable campaign=1
-- **Rationale**: Campaign feature increases user count and transaction opportunities. Previous attempt failed with "多重決済を検知しました" (multi-payment detected) error due to race conditions in postBuy.
-- **Root Cause Analysis**:
-  - postBuy was optimized to make external API calls (payment, shipment) BEFORE starting the DB transaction to minimize lock hold time
-  - This allowed two concurrent requests for the same item to both call the payment API before either acquired the DB lock
-  - Both payment calls succeeded, causing multi-payment detection by the benchmark checker
-- **Solution**:
-  - Added `itemBuyLocks sync.Map` (map[int64]*sync.Mutex) for per-item locking
-  - Added `getItemBuyLock(itemID int64) *sync.Mutex` helper function
-  - Modified `postBuy` to acquire per-item lock before any processing
-  - Different items can still be purchased concurrently (no global lock contention)
-- **Changes**: `webapp/go/main.go`
-  - Line 82-84: Added itemBuyLocks sync.Map
-  - Lines 718-726: Added getItemBuyLock helper function
-  - Lines 1654-1659: Acquire per-item lock at the start of postBuy
-  - Line 793: Changed Campaign from 0 to 1 in postInitialize
-- **How to discover**: Previous failed attempt with campaign=1 showed "多重決済を検知しました" error. Analysis of postBuy code revealed API calls were made before DB transaction lock acquisition.
+## 最適化 17: Nginx 設定の最適化
+- **実装内容**: 包括的なnginx最適化
+- **理由**: Nginxは静的ファイルを含む全リクエストをプロキシしており、不要なオーバーヘッドを追加していた
+- **変更ファイル**: `webapp/etc/nginx/conf.d/default.conf`
+  - キープアライブ接続付きのupstreamブロックを追加（32接続）
+  - テキストコンテンツタイプ向けgzip圧縮を有効化
+  - 静的ファイル（css、js、img、upload）をnginxから直接配信
+  - プロキシ接続にHTTP/1.1とキープアライブを使用
+- **発見方法**: ベンチマークで多くの異なるエンドポイント（login、sell、items、new_items、transactions）で同時にタイムアウトが発生し、特定のエンドポイントではなくインフラレベルのボトルネックを示唆。nginx設定を確認し、静的ファイル配信や接続最適化のない最小限の設定を発見
 
-#### Results After Optimization 24
-- **Score: 31,200-32,600** (raw: 33,200-33,600, penalty: 1,000-2,000)
-- **Improvement: 15,160 → ~32,000 (+16,840, +111%)**
-- **Cumulative: 1,810 → ~32,000 (+1,668%)**
-- **Multi-payment errors eliminated** - race condition fixed
-- Timeout errors cause final check failures but score significantly improved
-- Campaign enabled successfully - more users and transactions
+### 最適化 17 の結果
+- **スコア: 6550-7460**（大幅改善！）
+- **最終チェック失敗なし** - 安定性向上
+- **累計: 1810 → 7460 (+312%)**
+- 静的ファイル配信をGoアプリからnginxにオフロード
+- キープアライブで接続オーバーヘッドを削減
 
-### Optimization 25: HTTP Client Optimization and Campaign=2
-- **Implementation**: Custom HTTP client with connection pooling and increase campaign to 2
-- **Rationale**:
-  - Default http.Client has no timeout and limited connection pooling
-  - Campaign=2 increases users/transactions further with per-item mutex preventing multi-payment
-- **Changes**:
-  - `webapp/go/api.go`: Added `apiHTTPClient` with optimized settings
-    - MaxIdleConns: 100, MaxIdleConnsPerHost: 50, MaxConnsPerHost: 100
-    - Keep-alive: 30s, Dial timeout: 3s, Total timeout: 5s
-    - Replaced all `http.DefaultClient.Do()` with `apiHTTPClient.Do()`
-  - `webapp/go/main.go`: Changed Campaign from 1 to 2
-- **Testing Results**:
-  - Campaign=1: ~31,500
-  - Campaign=2: ~35,000-37,000 (selected - stable)
-  - Campaign=3: 40,000-45,000 (unstable - sometimes fails)
-  - Campaign=4: Failed (too many errors)
-- **How to discover**: Analysis of external API call patterns and testing different campaign levels
+---
 
-#### Results After Optimization 25
-- **Score: 36,620** (raw: 39,620, penalty: 3,000)
-- **Improvement: 31,500 → 36,620 (+5,120, +16%)**
-- **Cumulative: 1,810 → 36,620 (+1,923%)**
-- Connection reuse reduces TCP handshake overhead
-- Campaign=2 increases transaction volume
-- 6 final check errors due to timeouts under higher load
+## 最適化試行 18（失敗）: getTransactions での並列 APIShipmentStatus
+- **試行した実装**: ゴルーチンを使用して `getTransactions` 内の `APIShipmentStatus` APIコールを並列化
+- **理由**: Mackerel HTTP Server Stats で GET /users/transactions.json の P95 が986ms（257リクエスト）。done以外のステータスの配送への順次APIコールが潜在的なボトルネックとして特定された。
+- **変更内容**:
+  - APIコールが必要な全配送（status != ShippingsStatusDone）を収集
+  - ゴルーチンとチャネルを使用して全APIコールを並列実行
+  - 後でメインループで使用するため結果をマップに格納
+- **発見方法**: Mackerel HTTP Server Stats で GET /users/transactions.json が P95 986ms の最も遅いエンドポイントの1つ
 
-### Optimization 26: Lazy Shipment Creation and DB-First Strategy for Campaign=3
-- **Implementation**: Two major changes to postBuy for campaign=3 stability
-- **Root Cause Analysis**: Campaign=3 was unstable with "購入されたはずなのに記録されていません" errors because:
-  1. Payment API was called BEFORE DB transaction
-  2. If request timed out AFTER payment succeeded but BEFORE DB commit, benchmarker saw inconsistency
-- **Solution 1 - Lazy Shipment Creation**:
-  - Remove APIShipmentCreate from postBuy (reduces latency from ~1800ms to ~900ms)
-  - Defer shipment reservation to postShip (when seller actually ships)
-  - Insert shippings record with empty reserve_id in postBuy, populate lazily in postShip
-- **Solution 2 - DB-First Strategy**:
-  - Commit DB transaction FIRST (mark item as "trading", create transaction_evidence, shipping)
-  - THEN call payment API with detached context (context.WithoutCancel)
-  - If payment fails, manually rollback DB changes via rollbackBuy() function
-  - This ensures item is visible to benchmarker's final check even if request times out after DB commit
-- **Changes**: `webapp/go/main.go`
-  - Added `rollbackBuy()` function to revert DB changes if payment fails
-  - Modified `postBuy()` to commit DB before calling payment API
-  - Modified `postShip()` to lazily call APIShipmentCreate if reserve_id is empty
-  - Changed Campaign from 2 to 3
-- **How to discover**: Analysis of timeout-induced inconsistency pattern in final check errors
+### 最適化試行 18 の結果
+- **スコア: 2950**（raw: 5950、ペナルティ: 3000）
+- **6件の最終チェック失敗**: 「購入されたはずなのに記録されていません」
+- **根本原因分析**: 並列APIコールがリソース競合やレースコンディションを引き起こし、取引失敗につながった可能性
+- **対応**: 変更をリバート
 
-#### Results After Optimization 26
-- **Score: 37,900-42,780** (raw, penalty: 0)
-- **Improvement: 36,620 → ~40,000 (+3,380, +9%)**
-- **Cumulative: 1,810 → ~40,000 (+2,110%)**
-- **Campaign=3 now stable** - no final check errors in 6 consecutive runs
-- **Final check errors eliminated** - DB-first strategy ensures consistency
-- Score variance due to system load, but all runs pass benchmark
+---
 
-### Optimization 27: Parallel APIShipmentStatus in getTransactions for Campaign=4
-- **Implementation**: Parallelize `APIShipmentStatus` API calls in `getTransactions` using goroutines
-- **Root Cause Analysis**: At campaign=4, `getTransactions` was calling `APIShipmentStatus` sequentially in a loop for each item with non-terminal shipping status. With N items needing status check:
-  - Sequential: Total time = N * ~800ms = ~8000ms for 10 items (timeout)
-  - Parallel: Total time = max(latencies) = ~800ms regardless of N
-- **Solution**:
-  1. Collect all shippings that need API status check (status != "done" and has reserve_id)
-  2. Launch goroutines for all API calls simultaneously
-  3. Collect results via buffered channel
-  4. Use pre-fetched status in main loop; fallback to DB value on API error
-- **Changes**: `webapp/go/main.go`
-  - Added parallel API call logic before the main item processing loop
-  - Each goroutine calls `APIShipmentStatus` independently
-  - Results stored in `shipmentStatusMap[teID]` for O(1) lookup
-  - Changed Campaign from 3 to 4
-- **Why not use errgroup**: Simple channel-based approach sufficient here; errgroup adds overhead for non-error-propagating pattern (we fallback to DB on error)
-- **How to discover**: Previous optimization attempt 18 failed due to resource contention, but the root cause was different architecture. Current DB-first strategy in postBuy makes parallel calls safe.
+## 最適化 18: データベース接続プール設定
+- **実装内容**: データベース接続処理を最適化するため接続プール設定を追加
+- **理由**: 明示的な接続プール設定がなく、システムは loadavg 約3.0 でCPUバウンド
+- **変更ファイル**: `webapp/go/main.go`
+  - `SetMaxOpenConns(50)` - 最大オープン接続数を制限
+  - `SetMaxIdleConns(25)` - 再利用のためアイドル接続を維持
+  - `SetConnMaxLifetime(5 * time.Minute)` - 古い接続を防止
+- **発見方法**: grep検索で接続プール設定が未設定であることを発見。Mackerel Host Metrics でベンチマーク中のCPU使用率が94%。
 
-#### Results After Optimization 27
-- **Score: 42,760-44,880** (verified across 4 consecutive runs)
-- **Improvement: ~40,000 → ~43,500 (+9%)**
-- **Cumulative: 1,810 → ~43,500 (+2,303%)**
-- **Campaign=4 now stable** - all 4 runs passed benchmark
-- Parallel API calls reduced getTransactions latency from O(N*800ms) to O(800ms)
+### 最適化 18 の結果
+- **スコア: 6550**（6550-7560の変動範囲内）
+- 影響: ニュートラルからわずかな改善（負荷時の接続再利用に有効）
+- 安定性: 最終チェック失敗なし
 
-### Optimization 28: MySQL Additional Performance Tuning
-- **Implementation**: Add additional MySQL performance settings
-- **Rationale**: CPU usage high (peak 327%), loadavg 7.29. Added settings to improve thread handling and I/O performance.
-- **Changes**: `webapp/etc/conf.d/my.cnf`
-  - `thread_cache_size = 100` - Cache threads to reduce creation overhead
-  - `innodb_thread_concurrency = 0` - Automatic concurrency control
-  - `innodb_read_io_threads = 4` - Parallel I/O reads
-  - `innodb_write_io_threads = 4` - Parallel I/O writes
-  - `innodb_io_capacity = 2000` - SSD I/O capacity
-  - `innodb_io_capacity_max = 4000` - Max I/O capacity
-  - `innodb_buffer_pool_instances = 2` - Buffer pool concurrency
-  - `table_open_cache = 4000` - Table handle caching
-  - `table_definition_cache = 2000` - Table definition caching
-  - `sync_binlog = 0` - Reduce binary log sync overhead
-- **How to discover**: Mackerel Host Metrics showed CPU user 327%, loadavg5 7.29. MySQL optimization helps reduce DB overhead under high load.
+---
 
-#### Results After Optimization 28
-- **Score: 42,640** (pass, no penalty)
-- **Impact: Neutral** - within variance range of 42,760-44,880
-- DB queries remain fast (P95 1-3ms)
-- Timeout errors due to external API call latency (not MySQL)
+## 最適化 19: カテゴリクエリで IN の代わりに BETWEEN を使用
+- **実装内容**: 子カテゴリクエリで `category_id IN (...)` を `category_id >= ? AND category_id <= ?` に置換
+- **理由**: 子カテゴリIDは連続している（例: 親1の子は2,3,4,5,6）。BETWEENを使用することでMySQLは各IN値に対する複数のインデックスルックアップの代わりに単一の効率的なレンジスキャンを実行できる。
+- **変更ファイル**: `webapp/go/main.go`
+  - 親の最小/最大カテゴリIDを返す `getChildCategoryIDRange()` 関数を追加
+  - IN句の代わりにBETWEEN句を使用するよう `getNewCategoryItems()` を変更
+  - クエリを `category_id IN (2,3,4,5,6)` から `category_id >= 2 AND category_id <= 6` に変更
+- **発見方法**: Mackerel DB Query Stats で `SELECT ... FROM items WHERE status IN (?,?) AND category_id IN (...)` クエリの P95 が500-600ms。カテゴリデータで子カテゴリIDが連続していることを確認。
 
-### Current Bottleneck Analysis (2025-12-01)
+### 最適化 19 の結果
+- **スコア: 6750**（+700, +12%）
+- **累計: 1810 → 6750 (+273%)**
+- **最終チェック失敗なし**（以前は2エラー）
+- 複数のポイントルックアップの代わりにレンジスキャンを使用してクエリ効率が向上
+- 安定性向上 - ペナルティが1000から0に削減
 
-#### Investigation Method
-1. **Mackerel HTTP Server Stats** - Endpoint latency, request count, error rate
-2. **Mackerel DB Query Stats** - Slow queries, execution count
-3. **Mackerel Trace Analysis** - Detailed time breakdown per operation
+---
 
-#### HTTP Server Stats (P95 latency order)
-| Endpoint | P95 | Requests | Error Rate | Notes |
+## 最適化 20: getNewItems でインデックス使用のため UNION を使用
+- **実装内容**: `status IN (?,?)` を2つの個別クエリのUNIONに置換
+- **理由**: MySQLクエリプランナーは `status IN (?,?)` 使用時に2つのソート済みインデックス範囲のマージが高コストと判断し、フルテーブルスキャン（44,000行）を選択した。UNIONを使用することで、各サブクエリがインデックスを効率的に使用し、LIMIT行のみを取得できる。
+- **測定されたパフォーマンス**:
+  - 元のクエリ: 191ms（フルテーブルスキャン + filesort）
+  - UNIONクエリ: 2.4ms（インデックススキャン、最大98行）
+  - **最初のページで80倍高速、ページネーションで22倍高速**
+- **変更ファイル**: `webapp/go/main.go`
+  - 個別のステータスクエリを持つUNION ALLを使用するよう `getNewItems()` を変更
+  - 各サブクエリは後方スキャンで `idx_status_created_id` インデックスを使用
+  - 最終UNIONは44,000行の代わりに98行（49+49）のみをソート
+- **発見方法**: EXPLAINで元のクエリに対して `type: ALL`（フルテーブルスキャン）と `Using filesort` が表示された。単一ステータスのテストで `ref` タイプと `Backward index scan` が表示され、IN句が問題であることを確認。
+
+### 最適化 20 の結果
+- **スコア: 9160**（+2410, +36%）
+- **累計: 1810 → 9160 (+406%)**
+- **最終チェック失敗なし**
+- 商品一覧エンドポイントが大幅に高速化
+- クエリ時間短縮によりシステムがより高い負荷を処理可能に
+
+---
+
+## 最適化 21: getNewCategoryItems で UNION を使用
+- **実装内容**: `getNewCategoryItems` で `status IN (?,?)` を2つの個別クエリのUNIONに置換
+- **理由**: 最適化20と同じ問題 - `status IN (?,?)` 使用時にMySQLクエリプランナーが非効率なプランを選択。UNION内の各サブクエリはインデックスを効率的に使用できる。
+- **変更ファイル**: `webapp/go/main.go`
+  - 個別のステータスクエリを持つUNION ALLを使用するよう `getNewCategoryItems()` を変更
+  - 各サブクエリに `category_id >= ? AND category_id <= ?` 条件を含む
+- **発見方法**: Mackerel DB Query Stats で `SELECT ... FROM items WHERE status IN (?,?) AND category_id >= ?...` が P95 196ms（1095回実行）。最も遅いクエリ。
+
+### 最適化 21 の結果
+- **スコア: 15160**（raw: 15160、ペナルティ: 0）
+- **改善: 9160 → 15160 (+6000, +65%)**
+- **累計: 1810 → 15160 (+737%)**
+- カテゴリ商品クエリが大幅に高速化（P95 196ms → 3ms）
+- DBクエリが完全に最適化 - CPU使用率が90-110%から14-58%に低下
+
+---
+
+## 最適化試行（失敗）: Campaign=1
+- **試行内容**: ユーザーと取引を増やすため campaign=1 に設定
+- **結果**: 重大エラー「多重決済を検知しました」
+- **根本原因**: 高負荷により同時購入リクエストでレースコンディション発生
+- **対応**: campaign=0 にリバート
+
+---
+
+## 最適化 22: getTransactions で APIタイムアウト時にDB値にフォールバック
+- **実装内容**: APIShipmentStatus が失敗してもエラーを返すのではなくDB値にフォールバック
+- **理由**: 外部APIコール（配送 /status）がタイムアウトを引き起こし、以下の結果になっていた:
+  - クライアントに500エラーを返す
+  - ベンチマーカーから「商品数が正しくありません」エラー（期待された商品が受信されない）
+  - 高いペナルティスコア（タイムアウトごとに-500）
+- **変更ファイル**: `webapp/go/main.go`
+  - APIコールが失敗してもDB配送ステータスで続行するよう `getTransactions()` を変更
+  - DB値は通常正確（postShip、postShipDone、postComplete で更新される）
+- **発見方法**: Mackerel HTTP Server Stats で GET /users/transactions.json の P95 が809ms、エラー率1.4%。アプリログで配送 /status APIコールの複数の「context canceled」エラーを確認。
+
+### 最適化 22 の結果
+- **スコア: 14660**（raw: 15160、ペナルティ: 500）
+- **改善: 13960 → 14660 (+700, +5%)**
+- **累計: 1810 → 14660 (+710%)**
+- エラー率削減: 「商品数が正しくありません」エラーが2から1に減少
+- ペナルティが1000から500に削減
+- APIタイムアウトが getTransactions の完全な失敗を引き起こさなくなった
+
+---
+
+## 最適化 23: ログイン用アカウント名キャッシュ
+- **実装内容**: ログイン検索を高速化するため account_name → User キャッシュを追加
+- **理由**: ログインクエリ（`SELECT * FROM users WHERE account_name = ?`）が99回実行、P95 66ms
+- **変更ファイル**: `webapp/go/main.go`
+  - account_name検索用に `userCacheByAccountName map[string]User` を追加
+  - キャッシュ優先検索の `getUserByAccountNameFromCache()` 関数を追加
+  - IDとaccount_name両方のキャッシュを作成するよう `loadUsers()` を更新
+  - 両方のキャッシュを維持するよう `setUserCache()` を更新
+  - DBクエリの代わりにキャッシュを使用するよう `postLogin()` を変更
+- **発見方法**: Mackerel DB Query Stats で `SELECT * FROM users WHERE account_name = ?` が99回実行、P95 66ms
+
+### 最適化 23 の結果
+- **スコア: 15160**（raw: 15160、ペナルティ: 0）
+- **影響**: ニュートラル（ベンチマーク中のログイン頻度は低い）
+- ログイン用DBクエリは排除されたが、主なボトルネックは外部APIコール（P95 820-824ms）のまま
+
+---
+
+## 最適化 24: アイテム単位Mutex で Campaign=1 を有効化
+- **実装内容**: 同時購入を防ぐためアイテム単位のmutexを追加し、campaign=1を有効化
+- **理由**: Campaign機能はユーザー数と取引機会を増やす。以前の試行は postBuy でのレースコンディションにより「多重決済を検知しました」エラーで失敗。
+- **根本原因分析**:
+  - postBuy はロック保持時間を最小化するため、DBトランザクション開始前に外部APIコール（決済、配送）を行うよう最適化されていた
+  - これにより、同じ商品への2つの同時リクエストが両方ともDBロック取得前に決済APIを呼び出すことが可能に
+  - 両方の決済コールが成功し、ベンチマークチェッカーによる多重決済検出を引き起こした
+- **解決策**:
+  - アイテム単位ロック用に `itemBuyLocks sync.Map`（map[int64]*sync.Mutex）を追加
+  - `getItemBuyLock(itemID int64) *sync.Mutex` ヘルパー関数を追加
+  - 処理開始前にアイテム単位ロックを取得するよう `postBuy` を変更
+  - 異なる商品は依然として同時に購入可能（グローバルロック競合なし）
+- **変更ファイル**: `webapp/go/main.go`
+  - 82-84行: itemBuyLocks sync.Map を追加
+  - 718-726行: getItemBuyLock ヘルパー関数を追加
+  - 1654-1659行: postBuy 開始時にアイテム単位ロックを取得
+  - 793行: postInitialize で Campaign を0から1に変更
+- **発見方法**: campaign=1 での以前の失敗試行で「多重決済を検知しました」エラー。postBuy コード分析でDBトランザクションロック取得前にAPIコールが行われていることを発見。
+
+### 最適化 24 の結果
+- **スコア: 31,200-32,600**（raw: 33,200-33,600、ペナルティ: 1,000-2,000）
+- **改善: 15,160 → 約32,000 (+16,840, +111%)**
+- **累計: 1,810 → 約32,000 (+1,668%)**
+- **多重決済エラー解消** - レースコンディション修正
+- タイムアウトエラーで最終チェック失敗するがスコアは大幅改善
+- Campaign有効化成功 - ユーザーと取引が増加
+
+---
+
+## 最適化 25: HTTPクライアント最適化と Campaign=2
+- **実装内容**: 接続プーリング付きカスタムHTTPクライアントと campaign を2に増加
+- **理由**:
+  - デフォルト http.Client はタイムアウトがなく接続プーリングが限定的
+  - アイテム単位mutexで多重決済を防ぎながら Campaign=2 でユーザー/取引をさらに増加
+- **変更内容**:
+  - `webapp/go/api.go`: 最適化設定付きの `apiHTTPClient` を追加
+    - MaxIdleConns: 100、MaxIdleConnsPerHost: 50、MaxConnsPerHost: 100
+    - Keep-alive: 30秒、Dial timeout: 3秒、Total timeout: 5秒
+    - 全ての `http.DefaultClient.Do()` を `apiHTTPClient.Do()` に置換
+  - `webapp/go/main.go`: Campaign を1から2に変更
+- **テスト結果**:
+  - Campaign=1: 約31,500
+  - Campaign=2: 約35,000-37,000（選択 - 安定）
+  - Campaign=3: 40,000-45,000（不安定 - 時々失敗）
+  - Campaign=4: 失敗（エラー過多）
+- **発見方法**: 外部APIコールパターンの分析と異なるcampaignレベルのテスト
+
+### 最適化 25 の結果
+- **スコア: 36,620**（raw: 39,620、ペナルティ: 3,000）
+- **改善: 31,500 → 36,620 (+5,120, +16%)**
+- **累計: 1,810 → 36,620 (+1,923%)**
+- 接続再利用によりTCPハンドシェイクオーバーヘッドを削減
+- Campaign=2 で取引量が増加
+- 高負荷によるタイムアウトで6件の最終チェックエラー
+
+---
+
+## 最適化 26: 遅延配送作成と Campaign=3 向けDB先行戦略
+- **実装内容**: campaign=3 の安定性のため postBuy に2つの大きな変更
+- **根本原因分析**: Campaign=3 は以下の理由で「購入されたはずなのに記録されていません」エラーが不安定:
+  1. 決済APIがDBトランザクション前に呼ばれていた
+  2. 決済成功後、DBコミット前にリクエストがタイムアウトすると、ベンチマーカーは不整合を検出
+- **解決策1 - 遅延配送作成**:
+  - postBuy から APIShipmentCreate を削除（レイテンシを約1800msから約900msに削減）
+  - 配送予約を postShip（出品者が実際に発送するとき）に延期
+  - postBuy では空の reserve_id で shippings レコードを挿入し、postShip で遅延的に設定
+- **解決策2 - DB先行戦略**:
+  - DBトランザクションを先にコミット（商品を「trading」にマーク、transaction_evidence、shipping を作成）
+  - その後、分離されたコンテキスト（context.WithoutCancel）で決済APIを呼び出し
+  - 決済が失敗したら rollbackBuy() 関数でDB変更を手動ロールバック
+  - これによりDBコミット後にリクエストがタイムアウトしても商品がベンチマーカーの最終チェックで見えることを保証
+- **変更ファイル**: `webapp/go/main.go`
+  - 決済失敗時にDB変更を元に戻す `rollbackBuy()` 関数を追加
+  - 決済API呼び出し前にDBをコミットするよう `postBuy()` を変更
+  - reserve_id が空の場合に遅延的に APIShipmentCreate を呼び出すよう `postShip()` を変更
+  - Campaign を2から3に変更
+- **発見方法**: 最終チェックエラーでのタイムアウト起因の不整合パターンの分析
+
+### 最適化 26 の結果
+- **スコア: 37,900-42,780**（raw、ペナルティ: 0）
+- **改善: 36,620 → 約40,000 (+3,380, +9%)**
+- **累計: 1,810 → 約40,000 (+2,110%)**
+- **Campaign=3 が安定化** - 6回連続で最終チェックエラーなし
+- **最終チェックエラー解消** - DB先行戦略で一貫性を確保
+- システム負荷によるスコア変動あるが、全実行がベンチマークに合格
+
+---
+
+## 最適化 27: Campaign=4 向け getTransactions での並列 APIShipmentStatus
+- **実装内容**: ゴルーチンを使用して `getTransactions` 内の `APIShipmentStatus` APIコールを並列化
+- **根本原因分析**: campaign=4 では、`getTransactions` が非終端配送ステータスの各商品に対して `APIShipmentStatus` を順次ループで呼び出していた。ステータスチェックが必要なN個の商品の場合:
+  - 順次: 合計時間 = N * 約800ms = 10商品で約8000ms（タイムアウト）
+  - 並列: 合計時間 = max(レイテンシ) = Nに関係なく約800ms
+- **解決策**:
+  1. APIステータスチェックが必要な全配送を収集（status != "done" かつ reserve_id あり）
+  2. 全APIコールを同時にゴルーチンで起動
+  3. バッファ付きチャネルで結果を収集
+  4. メインループでプリフェッチしたステータスを使用; APIエラー時はDB値にフォールバック
+- **変更ファイル**: `webapp/go/main.go`
+  - 商品処理メインループ前に並列APIコールロジックを追加
+  - 各ゴルーチンが `APIShipmentStatus` を独立して呼び出し
+  - 結果を `shipmentStatusMap[teID]` に格納してO(1)検索
+  - Campaign を3から4に変更
+- **errgroup を使わない理由**: シンプルなチャネルベースのアプローチで十分; errgroup はエラー伝播しないパターン（エラー時はDBにフォールバック）ではオーバーヘッド
+- **発見方法**: 以前の最適化試行18はリソース競合で失敗したが、根本原因は異なるアーキテクチャ。現在の postBuy のDB先行戦略により並列コールが安全に。
+
+### 最適化 27 の結果
+- **スコア: 42,760-44,880**（4回連続で検証）
+- **改善: 約40,000 → 約43,500 (+9%)**
+- **累計: 1,810 → 約43,500 (+2,303%)**
+- **Campaign=4 が安定化** - 全4回がベンチマークに合格
+- 並列APIコールで getTransactions レイテンシを O(N*800ms) から O(800ms) に削減
+
+---
+
+## 最適化 28: MySQL 追加パフォーマンスチューニング
+- **実装内容**: MySQL パフォーマンス設定を追加
+- **理由**: CPU使用率が高い（ピーク327%）、loadavg 7.29。スレッド処理とI/Oパフォーマンス向上のため設定追加。
+- **変更ファイル**: `webapp/etc/conf.d/my.cnf`
+  - `thread_cache_size = 100` - 作成オーバーヘッド削減のためスレッドをキャッシュ
+  - `innodb_thread_concurrency = 0` - 自動並行性制御
+  - `innodb_read_io_threads = 4` - 並列I/O読み取り
+  - `innodb_write_io_threads = 4` - 並列I/O書き込み
+  - `innodb_io_capacity = 2000` - SSD I/O容量
+  - `innodb_io_capacity_max = 4000` - 最大I/O容量
+  - `innodb_buffer_pool_instances = 2` - バッファプール並行性
+  - `table_open_cache = 4000` - テーブルハンドルキャッシュ
+  - `table_definition_cache = 2000` - テーブル定義キャッシュ
+  - `sync_binlog = 0` - バイナリログ同期オーバーヘッドを削減
+- **発見方法**: Mackerel Host Metrics で CPU user 327%、loadavg5 7.29。MySQL最適化で高負荷時のDBオーバーヘッドを削減。
+
+### 最適化 28 の結果
+- **スコア: 42,640**（合格、ペナルティなし）
+- **影響: ニュートラル** - 42,760-44,880の変動範囲内
+- DBクエリは高速のまま（P95 1-3ms）
+- タイムアウトエラーは外部APIコールレイテンシ（MySQLではない）が原因
+
+---
+
+## 現在のボトルネック分析（2025-12-01）
+
+### 調査方法
+1. **Mackerel HTTP Server Stats** - エンドポイントレイテンシ、リクエスト数、エラー率
+2. **Mackerel DB Query Stats** - 遅いクエリ、実行回数
+3. **Mackerel トレース分析** - 操作ごとの詳細な時間内訳
+
+### HTTP Server Stats（P95レイテンシ順）
+| エンドポイント | P95 | リクエスト数 | エラー率 | 備考 |
 |---|---|---|---|---|
-| POST /ship | 1749ms | 301 | 3.65% | **Slowest** |
-| POST /buy | 1285ms | 911 | 0% | Highest request count |
+| POST /ship | 1749ms | 301 | 3.65% | **最も遅い** |
+| POST /buy | 1285ms | 911 | 0% | 最多リクエスト |
 | POST /complete | 976ms | 270 | 0.37% | |
 | POST /ship_done | 907ms | 287 | 2.44% | |
 | GET /users/transactions.json | 893ms | 781 | 0% | |
 
-#### DB Query Stats (all fast, P95 < 130ms)
-- DELETE FROM shippings: P95 129ms (rollbackBuy, 18 executions)
-- UPDATE items SET buyer_id=0: P95 100ms (rollbackBuy, 18 executions)
-- UNION items queries: P95 33-59ms (pagination)
-- SELECT * FROM items WHERE id=?: P95 4ms (10,287 executions)
+### DB Query Stats（全て高速、P95 < 130ms）
+- DELETE FROM shippings: P95 129ms（rollbackBuy、18回実行）
+- UPDATE items SET buyer_id=0: P95 100ms（rollbackBuy、18回実行）
+- UNION items クエリ: P95 33-59ms（ページネーション）
+- SELECT * FROM items WHERE id=?: P95 4ms（10,287回実行）
 
-#### Trace Analysis - Time Breakdown
+### トレース分析 - 時間内訳
 
-**POST /ship (1702ms total)**
+**POST /ship（合計1702ms）**
 
-| Operation | Duration | Percentage |
+| 操作 | 所要時間 | 割合 |
 |---|---|---|
-| APIShipmentCreate | ~801ms | 47% |
-| APIShipmentRequest | ~802ms | 47% |
-| DB + Commit | ~99ms | 6% |
+| APIShipmentCreate | 約801ms | 47% |
+| APIShipmentRequest | 約802ms | 47% |
+| DB + コミット | 約99ms | 6% |
 
-**POST /buy (802ms total)**
+**POST /buy（合計802ms）**
 
-| Operation | Duration | Percentage |
+| 操作 | 所要時間 | 割合 |
 |---|---|---|
-| APIPaymentToken | ~800ms | 99.6% |
-| DB operations | ~3ms | 0.4% |
+| APIPaymentToken | 約800ms | 99.6% |
+| DB操作 | 約3ms | 0.4% |
 
-#### Key Finding
-**POST /ship is the biggest bottleneck** because it makes TWO sequential external API calls:
-1. `APIShipmentCreate` (~801ms) - Reserve shipment
-2. `APIShipmentRequest` (~802ms) - Get QR code
+### 重要な発見
+**POST /ship が最大のボトルネック** - 2つの順次外部APIコールを行うため:
+1. `APIShipmentCreate`（約801ms）- 配送予約
+2. `APIShipmentRequest`（約802ms）- QRコード取得
 
-These calls are sequential (total ~1600ms for external APIs alone).
+これらのコールは順次実行（外部API合計約1600ms）。
 
-#### Potential Optimization
-- Investigate if `APIShipmentCreate` and `APIShipmentRequest` can be parallelized or if QR code can be cached
-- Current external API latency (~800ms per call) is the fundamental performance limit
-- DB queries are fully optimized (P95 1-4ms for common queries)
-- Infrastructure (MySQL, Nginx) already at good levels
+### 潜在的な最適化
+- `APIShipmentCreate` と `APIShipmentRequest` の並列化、またはQRコードのキャッシュが可能か調査
+- 現在の外部APIレイテンシ（コールあたり約800ms）が根本的なパフォーマンス限界
+- DBクエリは完全に最適化済み（一般的なクエリでP95 1-4ms）
+- インフラ（MySQL、Nginx）は良好なレベル
 
-### Optimization 29: Parallel APIShipmentCreate in postBuy (Fire-and-Forget)
-- **Implementation**: Call APIShipmentCreate in parallel with APIPaymentToken in postBuy, fire-and-forget style
-- **Rationale**: POST /ship had two sequential API calls (APIShipmentCreate + APIShipmentRequest = ~1600ms total). By moving APIShipmentCreate to postBuy and running it in parallel with payment, postShip only needs APIShipmentRequest.
-- **Strategy**:
-  1. In postBuy, after DB commit, start both APIPaymentToken and APIShipmentCreate in parallel
-  2. Wait for payment result (required for transaction validity)
-  3. Don't wait for shipment create - spawn goroutine to update reserve_id asynchronously
-  4. postShip checks if reserve_id exists; if not, falls back to lazy creation
-- **Changes**: `webapp/go/main.go`
-  - Added parallel API call pattern in postBuy after DB commit
-  - APIPaymentToken result is awaited (required)
-  - APIShipmentCreate result is handled in fire-and-forget goroutine
-  - Reserve_id is updated asynchronously, postShip lazy creation serves as fallback
-- **How to discover**: Mackerel HTTP Server Stats showed POST /ship P95 1749ms (slowest endpoint). Mackerel Trace search revealed APIShipmentCreate (~801ms) + APIShipmentRequest (~802ms) = ~1600ms executed sequentially.
+---
 
-#### Results After Optimization 29
-- **Score: 46,560-46,600** (verified across 2 runs)
-- **Improvement: 44,900 → 46,600 (+1,700, +3.8%)**
-- **Cumulative: 1,810 → 46,600 (+2,475%)**
-- postBuy latency unchanged (still ~800ms for payment)
-- postShip latency reduced by ~800ms when reserve_id is pre-populated
-- Fire-and-forget pattern avoids blocking postBuy response on shipment creation
+## 最適化 29: postBuy での並列 APIShipmentCreate（Fire-and-Forget）
+- **実装内容**: postBuy で APIShipmentCreate を APIPaymentToken と並列に呼び出し（fire-and-forget 方式）
+- **理由**: POST /ship は2つの順次APIコール（APIShipmentCreate + APIShipmentRequest = 合計約1600ms）があった。APIShipmentCreate を postBuy に移動して決済と並列実行することで、postShip は APIShipmentRequest のみ必要に。
+- **戦略**:
+  1. postBuy で DBコミット後、APIPaymentToken と APIShipmentCreate を並列開始
+  2. 決済結果を待機（取引の有効性に必須）
+  3. 配送作成は待たない - 非同期で reserve_id を更新するゴルーチンを生成
+  4. postShip は reserve_id の存在を確認; なければ遅延作成にフォールバック
+- **変更ファイル**: `webapp/go/main.go`
+  - DBコミット後に並列APIコールパターンを追加
+  - APIPaymentToken 結果は待機（必須）
+  - APIShipmentCreate 結果は fire-and-forget ゴルーチンで処理
+  - Reserve_id は非同期更新、postShip の遅延作成がフォールバックとして機能
+- **発見方法**: Mackerel HTTP Server Stats で POST /ship の P95 が1749ms（最も遅いエンドポイント）。Mackerel トレース検索で APIShipmentCreate（約801ms）+ APIShipmentRequest（約802ms）= 約1600ms が順次実行されていることを発見。
 
-### pprof Analysis (2025-12-01)
+### 最適化 29 の結果
+- **スコア: 46,560-46,600**（2回で検証）
+- **改善: 44,900 → 46,600 (+1,700, +3.8%)**
+- **累計: 1,810 → 46,600 (+2,475%)**
+- postBuy レイテンシは変わらず（決済で約800ms）
+- reserve_id が事前設定されている場合、postShip レイテンシが約800ms削減
+- Fire-and-forget パターンで postBuy レスポンスが配送作成でブロックされることを回避
 
-#### Methodology
-- Added pprof handlers to Go application for CPU, heap, and allocation profiling
-- Collected 75-second CPU profile during benchmark run
-- Collected heap and allocation profiles after benchmark
+---
 
-#### CPU Profile Results
+## pprof 分析（2025-12-01）
 
-**Critical Finding: bcrypt.CompareHashAndPassword consumes 83.65% of CPU**
+### 方法論
+- CPU、ヒープ、アロケーションプロファイリング用に Go アプリケーションに pprof ハンドラを追加
+- ベンチマーク実行中に75秒のCPUプロファイルを収集
+- ベンチマーク後にヒープとアロケーションプロファイルを収集
 
-| Function | Cumulative % | Notes |
+### CPUプロファイル結果
+
+**重大な発見: bcrypt.CompareHashAndPassword が CPU の 83.65% を消費**
+
+| 関数 | 累積 % | 備考 |
 |---|---|---|
-| golang.org/x/crypto/blowfish.encryptBlock | 80.36% | bcrypt internal |
-| golang.org/x/crypto/blowfish.ExpandKey | 83.58% | bcrypt internal |
-| main.postLogin | 83.70% | Calls bcrypt |
+| golang.org/x/crypto/blowfish.encryptBlock | 80.36% | bcrypt 内部 |
+| golang.org/x/crypto/blowfish.ExpandKey | 83.58% | bcrypt 内部 |
+| main.postLogin | 83.70% | bcrypt を呼び出し |
 
-**Top CPU Functions (flat time)**
+**CPU使用量トップ関数（flat時間）**
 
-| Function | Flat % | Cumulative % |
+| 関数 | Flat % | 累積 % |
 |---|---|---|
 | blowfish.encryptBlock | 76.92% | 80.36% |
 | syscall.Syscall6 | 4.91% | 4.91% |
 | runtime.asyncPreempt | 3.69% | 3.69% |
 | blowfish.ExpandKey | 3.10% | 83.58% |
 
-**Other Endpoints CPU Usage (much smaller)**
-- main.getNewCategoryItems: 2.24% cumulative
-- main.getItem: 3.51% cumulative
-- main.getTransactions: 1.76% cumulative
+**他エンドポイントのCPU使用量（はるかに小さい）**
+- main.getNewCategoryItems: 2.24% 累積
+- main.getItem: 3.51% 累積
+- main.getTransactions: 1.76% 累積
 
-#### Memory Allocation Results
+### メモリアロケーション結果
 
-**Top Allocators (Total 12.4GB allocated during benchmark)**
+**トップアロケータ（ベンチマーク中の合計12.4GBアロケーション）**
 
-| Function | Allocation | % of Total | Notes |
+| 関数 | アロケーション | 全体の % | 備考 |
 |---|---|---|---|
 | grpc BufferPool | 1582MB | 12.77% | gRPC/OpenTelemetry |
-| database/sql.convertAssignRows | 1105MB | 8.93% | DB result scanning |
-| reflect.growslice | 987MB | 7.97% | Slice growing |
-| main.getNewCategoryItems | 618MB | 4.99% | Items listing |
-| main.getTransactions | 119MB | 0.96% | Transaction listing |
+| database/sql.convertAssignRows | 1105MB | 8.93% | DB結果スキャン |
+| reflect.growslice | 987MB | 7.97% | スライス拡張 |
+| main.getNewCategoryItems | 618MB | 4.99% | 商品一覧 |
+| main.getTransactions | 119MB | 0.96% | 取引一覧 |
 
-#### Key Observations
+### 主要な観察
 
-1. **bcrypt is the dominant CPU bottleneck**
-   - Every login request triggers bcrypt hash comparison (BcryptCost=10)
-   - ~84% of total CPU time spent on password hashing
-   - This is by design (security vs performance tradeoff)
+1. **bcrypt が支配的なCPUボトルネック**
+   - ログインリクエストごとに bcrypt ハッシュ比較が発生（BcryptCost=10）
+   - 総CPU時間の約84%がパスワードハッシュに費やされる
+   - これは設計通り（セキュリティ vs パフォーマンスのトレードオフ）
 
-2. **OpenTelemetry tracing has high memory overhead**
-   - 75.55% cumulative memory through otelchi.traceware.ServeHTTP
-   - gRPC buffer pool uses 1.5GB
-   - Trace recording allocates significant memory
+2. **OpenTelemetry トレーシングの高いメモリオーバーヘッド**
+   - otelchi.traceware.ServeHTTP で 75.55% 累積メモリ
+   - gRPC バッファプールが 1.5GB 使用
+   - トレース記録が大量のメモリをアロケート
 
-3. **Database operations are efficient**
-   - DB queries (sqlx, mysql driver) show minimal CPU usage
-   - Indexes and query optimizations are effective
+3. **データベース操作は効率的**
+   - DBクエリ（sqlx、mysqlドライバ）のCPU使用量は最小
+   - インデックスとクエリ最適化が効果的
 
-4. **External API calls dominate wall-clock time but not CPU**
-   - pprof shows CPU % but external API calls are I/O bound
-   - This is why they don't show up prominently in CPU profile
+4. **外部APIコールはウォールクロック時間を支配するがCPUは支配しない**
+   - pprof は CPU % を示すが、外部APIコールは I/O バウンド
+   - これがCPUプロファイルで目立たない理由
 
-#### Optimization Opportunities
+### 最適化機会
 
-1. **bcrypt Optimization (High Impact, Risky)**
-   - Option A: Reduce bcrypt cost (current: 10, could reduce to 4-6)
-   - Option B: Cache session after successful login to reduce login frequency
-   - Option C: Pre-compute bcrypt hashes are not cacheable (each compare needs work)
-   - **Risk**: May violate benchmarker's security expectations
+1. **bcrypt 最適化（高影響、リスクあり）**
+   - オプションA: bcrypt コストを下げる（現在: 10、4-6に削減可能）
+   - オプションB: ログイン成功後にセッションをキャッシュしてログイン頻度を削減
+   - オプションC: bcrypt ハッシュの事前計算は不可（比較ごとに計算が必要）
+   - **リスク**: ベンチマーカーのセキュリティ要件に違反する可能性
 
-2. **OpenTelemetry Optimization (Medium Impact)**
-   - Reduce trace sampling rate
-   - Disable tracing for non-essential endpoints
-   - Consider removing tracing entirely for maximum performance
-   - **Risk**: Loses observability benefits
+2. **OpenTelemetry 最適化（中程度の影響）**
+   - トレースサンプリングレートを下げる
+   - 非必須エンドポイントのトレーシングを無効化
+   - 最大パフォーマンスのためトレーシングを完全に削除することも検討
+   - **リスク**: 可観測性のメリットを失う
 
-3. **Memory Allocation Reduction (Low Impact)**
-   - Use sync.Pool for frequently allocated structs
-   - Pre-allocate slices with known capacity
-   - **Note**: GC overhead is not currently a bottleneck
+3. **メモリアロケーション削減（低影響）**
+   - 頻繁にアロケートされる構造体に sync.Pool を使用
+   - 既知の容量でスライスを事前アロケート
+   - **注**: GC オーバーヘッドは現在ボトルネックではない
 
-#### Conclusion
+### 結論
 
-The pprof analysis reveals that **bcrypt password hashing** is the largest CPU consumer by far (84%). However, this is a deliberate security feature and reducing bcrypt cost may not be permitted by the benchmark rules.
+pprof 分析により、**bcrypt パスワードハッシュ**が最大のCPU消費者（84%）であることが判明。ただし、これは意図的なセキュリティ機能であり、bcrypt コストの削減はベンチマークルールで許可されていない可能性がある。
 
-The second largest overhead is **OpenTelemetry tracing** which adds both CPU and memory overhead. If tracing is not required for scoring, disabling it could provide performance gains.
+2番目に大きなオーバーヘッドは**OpenTelemetry トレーシング**で、CPUとメモリの両方にオーバーヘッドを追加。スコアリングにトレーシングが不要な場合、無効化によりパフォーマンス向上が見込める。
 
-DB and application logic are highly optimized - no significant CPU bottlenecks remain in the core business logic.
+DBとアプリケーションロジックは高度に最適化されており、コアビジネスロジックに大きなCPUボトルネックは残っていない。
 
-### Optimization 30: bcrypt Result Caching
-- **Implementation**: Cache successful bcrypt verification results to skip expensive bcrypt calls on repeat logins
-- **Rationale**: pprof analysis showed `bcrypt.CompareHashAndPassword` in `postLogin` consumes 84% of CPU time. By caching successful verifications, subsequent logins with the same password can skip the expensive bcrypt computation.
-- **Strategy**:
-  1. Create a cache mapping `password -> verifiedHashedPassword`
-  2. On login, check if password is in cache AND cached hash matches user's current stored hash
-  3. If cache hit and hash match, skip bcrypt (password was verified before and hasn't changed)
-  4. If cache miss or hash mismatch (password changed), fall back to bcrypt and cache on success
-  5. Clear cache on /initialize to handle database resets
-- **Changes**: `webapp/go/main.go`
-  - Added `bcryptCache map[string][]byte` and `bcryptCacheMu sync.RWMutex`
-  - Added `initBcryptCache()` to initialize/reset the cache
-  - Added `verifyPasswordWithCache()` to verify passwords with cache
-  - Modified `postLogin()` to use cached verification
-  - Called `initBcryptCache()` in `main()` and `postInitialize()`
-- **How to discover**: pprof CPU profile showed 83.65% cumulative CPU in bcrypt.CompareHashAndPassword called from postLogin
-- **Security consideration**: This is safe for ISUCON because:
-  - Same behavior: correct passwords succeed, incorrect fail
-  - Handles password changes: hash mismatch falls back to bcrypt
-  - Cache cleared on initialize: fresh start for each benchmark run
-  - Not persisted: cache rebuilt from successful logins
+---
 
-#### Results After Optimization 30
-- **Score: 48,460-50,140** (verified across 3 runs)
-- **Improvement: 46,600 → ~49,000 (+2,400, +5%)**
-- **Cumulative: 1,810 → ~49,000 (+2,607%)**
-- **No final check failures** - all benchmark runs passed
-- CPU usage in postLogin reduced by avoiding repeated bcrypt computations
-- bcrypt still runs on first login per password (cache warming)
-- Subsequent logins with same password are O(1) instead of O(2^cost)
+## 最適化 30: bcrypt 結果キャッシュ
+- **実装内容**: 成功した bcrypt 検証結果をキャッシュし、再ログイン時の高コストな bcrypt コールをスキップ
+- **理由**: pprof 分析で `postLogin` 内の `bcrypt.CompareHashAndPassword` がCPU時間の84%を消費していることが判明。成功した検証をキャッシュすることで、同じパスワードでの以降のログインは高コストな bcrypt 計算をスキップできる。
+- **戦略**:
+  1. `password -> verifiedHashedPassword` のマッピングをキャッシュとして作成
+  2. ログイン時、パスワードがキャッシュにあり、キャッシュされたハッシュがユーザーの現在の保存ハッシュと一致するか確認
+  3. キャッシュヒットかつハッシュ一致なら、bcrypt をスキップ（パスワードは以前検証済みで変更なし）
+  4. キャッシュミスまたはハッシュ不一致（パスワード変更）なら、bcrypt にフォールバックし成功時にキャッシュ
+  5. データベースリセットに対応するため /initialize でキャッシュをクリア
+- **変更ファイル**: `webapp/go/main.go`
+  - `bcryptCache map[string][]byte` と `bcryptCacheMu sync.RWMutex` を追加
+  - キャッシュを初期化/リセットする `initBcryptCache()` を追加
+  - キャッシュ付きでパスワードを検証する `verifyPasswordWithCache()` を追加
+  - キャッシュ検証を使用するよう `postLogin()` を変更
+  - `main()` と `postInitialize()` で `initBcryptCache()` を呼び出し
+- **発見方法**: pprof CPUプロファイルで postLogin から呼び出される bcrypt.CompareHashAndPassword が 83.65% 累積CPU
+- **セキュリティ考慮**: ISUCON では以下の理由で安全:
+  - 同じ動作: 正しいパスワードは成功、不正なら失敗
+  - パスワード変更に対応: ハッシュ不一致時は bcrypt にフォールバック
+  - initialize でクリア: ベンチマーク実行ごとに新規スタート
+  - 永続化しない: 成功したログインからキャッシュを再構築
 
+### 最適化 30 の結果
+- **スコア: 48,460-50,140**（3回で検証）
+- **改善: 46,600 → 約49,000 (+2,400, +5%)**
+- **累計: 1,810 → 約49,000 (+2,607%)**
+- **最終チェック失敗なし** - 全ベンチマーク実行が合格
+- 繰り返しの bcrypt 計算を回避して postLogin のCPU使用量を削減
+- bcrypt はパスワードごとの初回ログインで実行（キャッシュウォーミング）
+- 同じパスワードでの以降のログインは O(2^cost) から O(1) に
