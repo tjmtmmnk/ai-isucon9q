@@ -43,6 +43,7 @@ CREATE TABLE `items` (
   INDEX idx_status_created_id (`status`, `created_at`, `id`),
   INDEX idx_seller_status_created_id (`seller_id`, `status`, `created_at`, `id`),
   INDEX idx_buyer_created_id (`buyer_id`, `created_at`, `id`),
+  INDEX idx_buyer_status_created_id (`buyer_id`, `status`, `created_at`, `id`),
   INDEX idx_category_status_created_id (`category_id`, `status`, `created_at`, `id`)
 ) ENGINE = InnoDB DEFAULT CHARACTER SET utf8mb4;
 
