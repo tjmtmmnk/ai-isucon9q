@@ -26,8 +26,6 @@ import (
 	"github.com/gorilla/securecookie"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
-	"github.com/riandyrn/otelchi"
-	"github.com/uptrace/opentelemetry-go-extra/otelsqlx"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -320,17 +318,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Initialize OpenTelemetry
-	shutdown, err := initTracer(ctx)
-	if err != nil {
-		log.Printf("failed to initialize tracer: %v", err)
-	} else {
-		defer func() {
-			if err := shutdown(context.Background()); err != nil {
-				log.Printf("failed to shutdown tracer: %v", err)
-			}
-		}()
-	}
+	var err error
 
 	host := os.Getenv("MYSQL_HOST")
 	if host == "" {
@@ -365,7 +353,7 @@ func main() {
 	conf.DBName = dbname
 	conf.ParseTime = true
 
-	dbx, err = otelsqlx.Open("mysql", conf.FormatDSN())
+	dbx, err = sqlx.Open("mysql", conf.FormatDSN())
 	if err != nil {
 		log.Fatalf("failed to connect to DB: %s.", err.Error())
 	}
@@ -396,9 +384,6 @@ func main() {
 	defer root.Close()
 
 	r := chi.NewRouter()
-
-	// Add tracing middleware
-	r.Use(otelchi.Middleware("isucari", otelchi.WithChiRoutes(r)))
 
 	// pprof handlers for profiling (enabled for performance analysis)
 	r.HandleFunc("/debug/pprof/", pprof.Index)

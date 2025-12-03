@@ -769,3 +769,26 @@ DBとアプリケーションロジックは高度に最適化されており、
 - 繰り返しの bcrypt 計算を回避して postLogin のCPU使用量を削減
 - bcrypt はパスワードごとの初回ログインで実行（キャッシュウォーミング）
 - 同じパスワードでの以降のログインは O(2^cost) から O(1) に
+
+---
+
+## 最適化 31: OpenTelemetry トレーシングの削除
+- **実装内容**: アプリケーションから OpenTelemetry 計装を完全に削除
+- **理由**: pprof 分析で OTel トレーシングが大きなオーバーヘッドを示していた:
+  - メモリの75%以上がトレース処理に消費
+  - gRPC バッファプールが1.5GB使用
+  - 各APIコールでトレースコンテキストの伝播処理が発生
+- **変更ファイル**:
+  - `webapp/go/main.go`: OTelインポート、initTracer呼び出し、otelchi middleware、otelsqlx.Open を削除
+  - `webapp/go/api.go`: トレーススパン作成、span.RecordError、otel.GetTextMapPropagator().Inject を削除
+  - `webapp/go/otel.go`: ファイル削除
+  - `webapp/go/go.mod`: OTel関連依存関係を削除
+- **発見方法**: pprof メモリプロファイルで otelchi.traceware.ServeHTTP が 75.55% 累積メモリ、gRPC バッファプールが 1.5GB を使用
+
+### 最適化 31 の結果
+- **スコア: 50,280**
+- **改善: 約49,000 → 50,280 (+1,280, +2.6%)**
+- **累計: 1,810 → 50,280 (+2,677%)**
+- **最終チェック失敗なし**
+- トレース処理のCPUとメモリオーバーヘッドを完全に削除
+- APIコールのレイテンシが若干改善（トレースコンテキスト伝播のオーバーヘッド削減）
