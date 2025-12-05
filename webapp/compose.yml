@@ -20,6 +20,8 @@ services:
       dockerfile: go/Dockerfile
     depends_on:
       mysql:
+        condition: service_healthy
+      otel-collector:
         condition: service_started
     environment:
       MYSQL_HOST: mysql
@@ -27,6 +29,7 @@ services:
       MYSQL_USER: root
       MYSQL_PASS: root
       MYSQL_NAME: isucari
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
     networks:
       - my_network
     volumes:
@@ -55,6 +58,24 @@ services:
         limits:
           cpus: "1"
           memory: 1g
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "127.0.0.1" ]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.114.0
+    command: [ "--config=/etc/otel-collector/config.yaml" ]
+    volumes:
+      - ./etc/otel-collector/config.yaml:/etc/otel-collector/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "13133:13133" # Health check
+    environment:
+      MACKEREL_APIKEY: "${MACKEREL_APIKEY}"
+    networks:
+      - my_network
 
 volumes:
   mysql:

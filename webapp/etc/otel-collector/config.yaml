@@ -1,0 +1,65 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+  # Tail sampling processor for intelligent trace sampling
+  tail_sampling:
+    # Decision wait time - how long to wait before making a sampling decision
+    decision_wait: 10s
+    # Number of traces to keep in memory
+    num_traces: 100000
+    # Expected new traces per second
+    expected_new_traces_per_sec: 1000
+    policies:
+      # Always sample traces with errors
+      - name: errors-policy
+        type: status_code
+        status_code:
+          status_codes:
+            - ERROR
+
+      # Always sample slow traces (latency > 500ms)
+      - name: latency-policy
+        type: latency
+        latency:
+          threshold_ms: 500
+
+      # Sample a percentage of remaining traces
+      - name: probabilistic-policy
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+      # Always sample database errors
+      - name: db-error-policy
+        type: string_attribute
+        string_attribute:
+          key: db.system
+          values:
+            - mysql
+
+exporters:
+  otlphttp/mackerel:
+    endpoint: "https://otlp-vaxila.mackerelio.com"
+    headers:
+      Accept: "*/*"
+      "Mackerel-Api-Key": "${env:MACKEREL_APIKEY}"
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [ health_check ]
+  pipelines:
+    traces:
+      receivers: [ otlp ]
+      processors: [ tail_sampling, batch ]
+      exporters: [ otlphttp/mackerel ]

@@ -2,10 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -50,133 +57,227 @@ type APIShipmentStatusReq struct {
 	ReserveID string `json:"reserve_id"`
 }
 
-func APIPaymentToken(paymentURL string, param *APIPaymentServiceTokenReq) (*APIPaymentServiceTokenRes, error) {
+func APIPaymentToken(ctx context.Context, paymentURL string, param *APIPaymentServiceTokenReq) (*APIPaymentServiceTokenRes, error) {
+	ctx, span := tracer.Start(ctx, "APIPaymentToken",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			semconv.HTTPURLKey.String(paymentURL+"/token"),
+			semconv.HTTPMethodKey.String(http.MethodPost),
+			semconv.PeerServiceKey.String("payment"),
+		),
+	)
+	defer span.End()
+
 	b, _ := json.Marshal(param)
 
-	req, err := http.NewRequest(http.MethodPost, paymentURL+"/token", bytes.NewBuffer(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, paymentURL+"/token", bytes.NewBuffer(b))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Content-Type", "application/json")
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 	defer res.Body.Close()
 
+	span.SetAttributes(semconv.HTTPStatusCodeKey.Int(res.StatusCode))
+
 	if res.StatusCode != http.StatusOK {
 		b, err := io.ReadAll(res.Body)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return nil, fmt.Errorf("failed to read res.Body and the status code of the response from shipment service was not 200: %v", err)
 		}
-		return nil, fmt.Errorf("status code: %d; body: %s", res.StatusCode, b)
+		err = fmt.Errorf("status code: %d; body: %s", res.StatusCode, b)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
 	pstr := &APIPaymentServiceTokenRes{}
 	err = json.NewDecoder(res.Body).Decode(pstr)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
 	return pstr, nil
 }
 
-func APIShipmentCreate(shipmentURL string, param *APIShipmentCreateReq) (*APIShipmentCreateRes, error) {
+func APIShipmentCreate(ctx context.Context, shipmentURL string, param *APIShipmentCreateReq) (*APIShipmentCreateRes, error) {
+	ctx, span := tracer.Start(ctx, "APIShipmentCreate",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			semconv.HTTPURLKey.String(shipmentURL+"/create"),
+			semconv.HTTPMethodKey.String(http.MethodPost),
+			semconv.PeerServiceKey.String("shipment"),
+		),
+	)
+	defer span.End()
+
 	b, _ := json.Marshal(param)
 
-	req, err := http.NewRequest(http.MethodPost, shipmentURL+"/create", bytes.NewBuffer(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, shipmentURL+"/create", bytes.NewBuffer(b))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", IsucariAPIToken)
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 	defer res.Body.Close()
 
+	span.SetAttributes(semconv.HTTPStatusCodeKey.Int(res.StatusCode))
+
 	if res.StatusCode != http.StatusOK {
 		b, err := io.ReadAll(res.Body)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return nil, fmt.Errorf("failed to read res.Body and the status code of the response from shipment service was not 200: %v", err)
 		}
-		return nil, fmt.Errorf("status code: %d; body: %s", res.StatusCode, b)
+		err = fmt.Errorf("status code: %d; body: %s", res.StatusCode, b)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
 	scr := &APIShipmentCreateRes{}
 	err = json.NewDecoder(res.Body).Decode(&scr)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
 	return scr, nil
 }
 
-func APIShipmentRequest(shipmentURL string, param *APIShipmentRequestReq) ([]byte, error) {
+func APIShipmentRequest(ctx context.Context, shipmentURL string, param *APIShipmentRequestReq) ([]byte, error) {
+	ctx, span := tracer.Start(ctx, "APIShipmentRequest",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			semconv.HTTPURLKey.String(shipmentURL+"/request"),
+			semconv.HTTPMethodKey.String(http.MethodPost),
+			semconv.PeerServiceKey.String("shipment"),
+		),
+	)
+	defer span.End()
+
 	b, _ := json.Marshal(param)
 
-	req, err := http.NewRequest(http.MethodPost, shipmentURL+"/request", bytes.NewBuffer(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, shipmentURL+"/request", bytes.NewBuffer(b))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", IsucariAPIToken)
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 	defer res.Body.Close()
 
+	span.SetAttributes(semconv.HTTPStatusCodeKey.Int(res.StatusCode))
+
 	if res.StatusCode != http.StatusOK {
 		b, err := io.ReadAll(res.Body)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return nil, fmt.Errorf("failed to read res.Body and the status code of the response from shipment service was not 200: %v", err)
 		}
-		return nil, fmt.Errorf("status code: %d; body: %s", res.StatusCode, b)
+		err = fmt.Errorf("status code: %d; body: %s", res.StatusCode, b)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
 	return io.ReadAll(res.Body)
 }
 
-func APIShipmentStatus(shipmentURL string, param *APIShipmentStatusReq) (*APIShipmentStatusRes, error) {
+func APIShipmentStatus(ctx context.Context, shipmentURL string, param *APIShipmentStatusReq) (*APIShipmentStatusRes, error) {
+	ctx, span := tracer.Start(ctx, "APIShipmentStatus",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			semconv.HTTPURLKey.String(shipmentURL+"/status"),
+			semconv.HTTPMethodKey.String(http.MethodGet),
+			semconv.PeerServiceKey.String("shipment"),
+		),
+	)
+	defer span.End()
+
 	b, _ := json.Marshal(param)
 
-	req, err := http.NewRequest(http.MethodGet, shipmentURL+"/status", bytes.NewBuffer(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, shipmentURL+"/status", bytes.NewBuffer(b))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", IsucariAPIToken)
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 	defer res.Body.Close()
 
+	span.SetAttributes(semconv.HTTPStatusCodeKey.Int(res.StatusCode))
+
 	if res.StatusCode != http.StatusOK {
 		b, err := io.ReadAll(res.Body)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return nil, fmt.Errorf("failed to read res.Body and the status code of the response from shipment service was not 200: %v", err)
 		}
-		return nil, fmt.Errorf("status code: %d; body: %s", res.StatusCode, b)
+		err = fmt.Errorf("status code: %d; body: %s", res.StatusCode, b)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
 	ssr := &APIShipmentStatusRes{}
 	err = json.NewDecoder(res.Body).Decode(&ssr)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
