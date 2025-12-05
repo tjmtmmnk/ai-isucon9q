@@ -6,6 +6,7 @@ services:
       app:
         condition: service_started
     volumes:
+      - ./etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./etc/nginx/conf.d:/etc/nginx/conf.d
       - ./public:/public
     ports:
@@ -30,6 +31,8 @@ services:
       MYSQL_PASS: root
       MYSQL_NAME: isucari
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+    ports:
+      - "8000:8000"  # Direct access for pprof
     networks:
       - my_network
     volumes:
