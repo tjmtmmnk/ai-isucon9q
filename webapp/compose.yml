@@ -77,6 +77,16 @@ services:
     networks:
       - my_network
 
+  mackerel-agent:
+    image: mackerel/mackerel-agent
+    container_name: mackerel-agent
+    environment:
+      - "apikey=${MACKEREL_APIKEY}"
+      - "enable_docker_plugin=1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/mackerel-agent/:/var/lib/mackerel-agent/
+
 volumes:
   mysql:
 
