@@ -8,7 +8,7 @@ require (
 	github.com/gorilla/securecookie v1.1.2
 	github.com/gorilla/sessions v1.4.0
 	github.com/jmoiron/sqlx v1.4.0
-	github.com/riandyrn/otelchi v0.12.2
+	github.com/riandyrn/otelchi v0.12.3
 	github.com/uptrace/opentelemetry-go-extra/otelsqlx v0.3.2
 	go.opentelemetry.io/otel v1.38.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.38.0
